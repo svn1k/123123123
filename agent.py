@@ -1,12 +1,10 @@
 """
 ConsumerAgent — GitHub Models-powered autonomous agent.
 
-Uses GitHub Models free inference API (OpenAI-compatible endpoint):
-  https://models.github.ai/inference
-  Model: openai/gpt-4.1  (or meta/llama-3.3-70b, etc.)
-  Auth:  GitHub PAT with models:read scope — БЕСПЛАТНО
-
-Tool calling format: OpenAI function calling spec.
+Key fixes:
+- Conversation history persists across messages (cleared only on payment)
+- All text in English
+- Demo balance shows 0 (not fake 100 USDC)
 """
 
 import json
@@ -24,14 +22,12 @@ config = Config()
 
 GITHUB_MODELS_URL = "https://models.github.ai/inference/chat/completions"
 
-# ─── Tool Definitions (OpenAI function-calling format) ────────────────────────
-
 AGENT_TOOLS = [
     {
         "type": "function",
         "function": {
             "name": "get_balance",
-            "description": "Получить текущий баланс пользователя (Solana + Private PER)",
+            "description": "Get user's current balance: Solana mainnet USDC and Private PER balance.",
             "parameters": {"type": "object", "properties": {}, "required": []}
         }
     },
@@ -39,13 +35,13 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "private_transfer",
-            "description": "Отправить приватный перевод USDC через MagicBlock Private Ephemeral Rollup. Полностью конфиденциально — нет on-chain связи.",
+            "description": "Send a private USDC transfer via MagicBlock Private Ephemeral Rollup. No on-chain link between sender and receiver.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "recipient": {"type": "string", "description": "Solana адрес получателя (base58)"},
-                    "amount": {"type": "number", "description": "Сумма в USDC"},
-                    "memo": {"type": "string", "description": "Комментарий к переводу"}
+                    "recipient": {"type": "string", "description": "Recipient Solana address (base58)"},
+                    "amount": {"type": "number", "description": "Amount in USDC"},
+                    "memo": {"type": "string", "description": "Optional memo for the transfer"}
                 },
                 "required": ["recipient", "amount"]
             }
@@ -55,14 +51,14 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "book_service",
-            "description": "Забронировать сервис (отель, ресторан, билет) и оплатить приватно.",
+            "description": "Book a service (hotel, restaurant, flight, event) and pay privately with USDC.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "service_type": {"type": "string", "enum": ["hotel", "restaurant", "flight", "event", "other"]},
-                    "description": {"type": "string", "description": "Описание бронирования"},
-                    "amount": {"type": "number", "description": "Сумма в USDC"},
-                    "merchant_address": {"type": "string", "description": "Solana адрес мерчанта"}
+                    "description": {"type": "string", "description": "Booking description"},
+                    "amount": {"type": "number", "description": "Amount in USDC"},
+                    "merchant_address": {"type": "string", "description": "Merchant Solana address (optional)"}
                 },
                 "required": ["service_type", "description", "amount"]
             }
@@ -72,14 +68,14 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "buy_product",
-            "description": "Купить товар и оплатить приватно через USDC.",
+            "description": "Buy a product and pay privately with USDC.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "product_name": {"type": "string", "description": "Название товара"},
-                    "amount": {"type": "number", "description": "Сумма в USDC"},
-                    "store": {"type": "string", "description": "Магазин или платформа"},
-                    "merchant_address": {"type": "string", "description": "Solana адрес мерчанта"}
+                    "product_name": {"type": "string", "description": "Product name"},
+                    "amount": {"type": "number", "description": "Amount in USDC"},
+                    "store": {"type": "string", "description": "Store or platform"},
+                    "merchant_address": {"type": "string", "description": "Merchant Solana address (optional)"}
                 },
                 "required": ["product_name", "amount"]
             }
@@ -89,12 +85,12 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "get_spending_history",
-            "description": "Получить историю трат (хранится только локально, не у рекламодателей).",
+            "description": "Get user spending history. Stored locally only — never shared with advertisers.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "period": {"type": "string", "enum": ["week", "month", "all"]},
-                    "category": {"type": "string", "description": "Категория (booking, purchase, send)"}
+                    "category": {"type": "string", "description": "Filter: booking, purchase, send"}
                 },
                 "required": []
             }
@@ -104,10 +100,10 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "deposit_to_per",
-            "description": "Делегировать USDC в Private Ephemeral Rollup для приватных транзакций.",
+            "description": "Delegate USDC into the Private Ephemeral Rollup to enable private transactions.",
             "parameters": {
                 "type": "object",
-                "properties": {"amount": {"type": "number", "description": "Сумма USDC"}},
+                "properties": {"amount": {"type": "number", "description": "Amount in USDC"}},
                 "required": ["amount"]
             }
         }
@@ -116,10 +112,10 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "withdraw_from_per",
-            "description": "Вывести USDC из Private PER обратно на Solana mainnet.",
+            "description": "Withdraw USDC from Private PER back to Solana mainnet.",
             "parameters": {
                 "type": "object",
-                "properties": {"amount": {"type": "number", "description": "Сумма USDC"}},
+                "properties": {"amount": {"type": "number", "description": "Amount in USDC"}},
                 "required": ["amount"]
             }
         }
@@ -128,13 +124,13 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "request_confirmation",
-            "description": "Запросить подтверждение от пользователя перед платежом. ОБЯЗАТЕЛЬНО вызывать перед любым переводом.",
+            "description": "Ask the user to confirm a payment before executing. MUST call this before any transfer.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "description": "Краткое описание действия"},
-                    "amount": {"type": "number", "description": "Сумма в USDC"},
-                    "details": {"type": "string", "description": "Детали для пользователя"}
+                    "action": {"type": "string", "description": "Short description of the action"},
+                    "amount": {"type": "number", "description": "Amount in USDC"},
+                    "details": {"type": "string", "description": "Full details to show the user"}
                 },
                 "required": ["action", "amount", "details"]
             }
@@ -142,21 +138,21 @@ AGENT_TOOLS = [
     }
 ]
 
-SYSTEM_PROMPT = """Ты — Autonomous Consumer Agent, ИИ-ассистент для приватных покупок и платежей в Telegram.
+SYSTEM_PROMPT = """You are an Autonomous Consumer Agent — an AI assistant for private purchases, bookings, and payments in Telegram.
 
-Работаешь на базе:
-- GitHub Models (бесплатный inference) — для интеллекта
-- MagicBlock Private Payments API — для конфиденциальных USDC-транзакций на Solana
-- Private Ephemeral Rollup (TEE/Intel TDX) — для защиты приватности
+Powered by:
+- GitHub Models (free inference) — intelligence
+- MagicBlock Private Payments API — confidential USDC transactions on Solana
+- Private Ephemeral Rollup (TEE / Intel TDX) — privacy layer
 
-ПРАВИЛА:
-1. 🔒 Перед ЛЮБЫМ платежом — вызывай request_confirmation
-2. 💡 Понимай запросы на русском и выполняй их автономно
-3. 📊 История трат хранится только у пользователя, не у рекламодателей
-4. ⚡ Будь конкретен: показывай суммы, адреса, детали
-5. 🛡️ Все переводы через Private PER — конфиденциально
+RULES:
+1. 🔒 ALWAYS call request_confirmation before any payment — no exceptions
+2. 💬 Remember conversation context — if the user previously asked to book a hotel and then sends just "150", that is the budget for that booking
+3. 📊 Spending history is stored locally only, never shared with advertisers
+4. ⚡ Be specific: show amounts, addresses, and details clearly
+5. 🛡️ All transfers go through Private PER — fully confidential
 
-Отвечай на русском языке. Используй эмодзи. Markdown: *жирный*, _курсив_."""
+Respond in English. Use emojis. Markdown: *bold*, _italic_."""
 
 
 class ConsumerAgent:
@@ -167,7 +163,6 @@ class ConsumerAgent:
         self.mb_client = MagicBlockClient(wallet_mgr)
 
     async def _call_api(self, messages: list) -> dict:
-        """Call GitHub Models API (OpenAI-compatible, free with GitHub PAT)."""
         headers = {
             "Authorization": f"Bearer {config.GITHUB_TOKEN}",
             "Content-Type": "application/json",
@@ -187,29 +182,41 @@ class ConsumerAgent:
             resp.raise_for_status()
             return resp.json()
 
-    async def process(self, user_message: str) -> dict:
-        """Main agentic loop: understand → plan → execute → respond."""
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_message}
-        ]
+    async def process(self, user_message: str, history: list) -> dict:
+        """
+        Main agentic loop.
 
-        for _ in range(10):  # max tool call depth
+        history: list of previous {"role": ..., "content": ...} messages.
+                 Persisted between calls, cleared only after confirmed payment.
+
+        Returns dict with keys:
+          message, keyboard, history (updated), awaiting_confirmation, clear_history_on_confirm
+        """
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        messages.extend(history)
+        messages.append({"role": "user", "content": user_message})
+
+        # Track new messages added this turn to append to history
+        new_messages = [{"role": "user", "content": user_message}]
+
+        for _ in range(10):
             data = await self._call_api(messages)
             choice = data["choices"][0]
             message = choice["message"]
+
             messages.append(message)
+            new_messages.append(message)
 
             finish_reason = choice.get("finish_reason")
 
-            # No tool calls — final text answer
             if finish_reason == "stop" or not message.get("tool_calls"):
                 return {
-                    "message": message.get("content") or "✅ Задача выполнена.",
-                    "keyboard": None
+                    "message": message.get("content") or "✅ Done.",
+                    "keyboard": None,
+                    "history": history + new_messages,
+                    "awaiting_confirmation": False
                 }
 
-            # Process each tool call
             for tool_call in message["tool_calls"]:
                 fn_name = tool_call["function"]["name"]
                 try:
@@ -217,33 +224,35 @@ class ConsumerAgent:
                 except json.JSONDecodeError:
                     fn_args = {}
 
-                # Confirmation needs user interaction — return early
                 if fn_name == "request_confirmation":
                     keyboard = InlineKeyboardMarkup([[
-                        InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm_tx:{tool_call['id']}"),
-                        InlineKeyboardButton("❌ Отмена", callback_data="cancel_tx"),
+                        InlineKeyboardButton("✅ Confirm", callback_data=f"confirm_tx:{tool_call['id']}"),
+                        InlineKeyboardButton("❌ Cancel", callback_data="cancel_tx"),
                     ]])
                     return {
                         "message": (
-                            f"⚠️ *Подтверждение действия*\n\n"
+                            f"⚠️ *Confirm Payment*\n\n"
                             f"🎯 *{fn_args.get('action', '')}*\n\n"
                             f"{fn_args.get('details', '')}\n\n"
-                            f"💵 Сумма: *{fn_args.get('amount', 0):.2f} USDC*\n\n"
-                            f"_🔒 Оплата приватна через MagicBlock PER_"
+                            f"💵 Amount: *{fn_args.get('amount', 0):.2f} USDC*\n\n"
+                            f"_🔒 Payment is private via MagicBlock PER_"
                         ),
                         "keyboard": keyboard,
-                        "awaiting_confirmation": True
+                        "history": history + new_messages,
+                        "awaiting_confirmation": True,
+                        "clear_history_on_confirm": True  # caller clears after payment
                     }
 
-                # Execute tool and feed result back
                 result = await self._execute_tool(fn_name, fn_args)
-                messages.append({
+                tool_msg = {
                     "role": "tool",
                     "tool_call_id": tool_call["id"],
                     "content": json.dumps(result, ensure_ascii=False)
-                })
+                }
+                messages.append(tool_msg)
+                new_messages.append(tool_msg)
 
-        return {"message": "✅ Выполнено.", "keyboard": None}
+        return {"message": "✅ Done.", "keyboard": None, "history": history + new_messages}
 
     async def _execute_tool(self, tool_name: str, args: dict) -> dict:
         logger.info(f"Tool: {tool_name}({args})")
@@ -259,7 +268,7 @@ class ConsumerAgent:
                 )
                 self.storage.add_record(
                     type="send",
-                    description=args.get("memo", "Перевод"),
+                    description=args.get("memo", "Transfer"),
                     amount=args["amount"],
                     tx_id=result.get("tx_id", ""),
                     metadata={"recipient": args["recipient"]}
@@ -291,7 +300,7 @@ class ConsumerAgent:
                 )
                 self.storage.add_record(
                     type="purchase",
-                    description=f"Покупка: {args['product_name']}",
+                    description=f"Purchase: {args['product_name']}",
                     amount=args["amount"],
                     tx_id=result.get("tx_id", ""),
                     metadata={"store": args.get("store", "unknown")}
