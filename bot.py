@@ -309,105 +309,62 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ─── Callback Handlers ────────────────────────────────────────────────────────
-
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the payment confirmation button (English version)."""
     query = update.callback_query
     await query.answer()
     user_id = str(query.from_user.id)
     data = query.data
 
-    if data == "stats_full":
-        storage = SpendingStorage(user_id)
-        stats = storage.get_stats()
-        await query.edit_message_text(
-            f"📈 *Full Statistics*\n\n"
-            f"💸 Total sent: *{stats['total_sent']:.2f} USDC*\n"
-            f"📥 Total received: *{stats['total_received']:.2f} USDC*\n"
-            f"🛒 Purchases: *{stats['purchases']}*\n"
-            f"🏨 Bookings: *{stats['bookings']}*\n"
-            f"📤 Transfers: *{stats['transfers']}*\n\n"
-            f"📅 Last 30 days: *{stats['month_spent']:.2f} USDC*\n"
-            f"📅 Last 7 days: *{stats['week_spent']:.2f} USDC*\n\n"
-            f"_🔒 This data is stored only on your device_",
-            parse_mode=ParseMode.MARKDOWN
-        )
-
-    elif data == "clear_history":
-        keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ Yes, delete", callback_data="confirm_clear"),
-            InlineKeyboardButton("❌ Cancel", callback_data="cancel_clear"),
-        ]])
-        await query.edit_message_text(
-            "⚠️ *Confirm*\n\nDelete all spending history?",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=keyboard
-        )
-
-    elif data == "confirm_clear":
-        SpendingStorage(user_id).clear_history()
-        await query.edit_message_text("✅ History deleted.")
-
-    elif data == "cancel_clear":
-        await query.edit_message_text("❌ Cancelled.")
-
-    elif data == "export_key":
-        wallet_mgr = WalletManager(user_id)
-        info = wallet_mgr.get_wallet_info()
-        await query.message.reply_text(
-            f"🔑 *Private key (Base58):*\n\n"
-            f"||`{info.get('private_key_b58', 'unavailable')}`||\n\n"
-            f"⚠️ *Never share this with anyone!*",
-            parse_mode=ParseMode.MARKDOWN
-        )
-
-    elif data.startswith("confirm_tx:"):
-        # Payment confirmed — execute the pending transaction and clear context
+    if data == "pay_now":
+        # Retrieve pending transaction data prepared by the Agent
         tx_data = context.user_data.get("pending_tx")
-        wallet_mgr = WalletManager(user_id)
+        if not tx_data:
+            await query.edit_message_text(
+                "⚠️ *Error:* Transaction data not found. Please try again.", 
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
 
-        if tx_data:
-            from magicblock import MagicBlockClient
-            storage = SpendingStorage(user_id)
-            client = MagicBlockClient(wallet_mgr)
-            msg = await query.edit_message_text("⏳ Executing transaction...")
-            try:
-                result = await client.private_transfer(
-                    recipient=tx_data["recipient"],
-                    amount=tx_data["amount"],
-                    memo=tx_data.get("memo", "")
-                )
-                storage.add_record(
-                    type=tx_data.get("record_type", "send"),
-                    description=tx_data.get("description", "Transfer"),
-                    amount=tx_data["amount"],
-                    tx_id=result.get("tx_id", ""),
-                    metadata=tx_data
-                )
-                await msg.edit_text(
-                    f"✅ *Transaction complete!*\n\n"
-                    f"💵 Amount: *{tx_data['amount']} USDC*\n"
-                    f"📍 Recipient: `{tx_data['recipient'][:8]}...`\n"
-                    f"🔒 TX: `{result.get('tx_id', 'private')[:16]}...`\n\n"
-                    f"_Transaction is private — no on-chain link_",
-                    parse_mode=ParseMode.MARKDOWN
-                )
-            except Exception as e:
-                await msg.edit_text(f"❌ Error: {str(e)}")
-        else:
-            await query.edit_message_text("⚠️ No pending transaction found.")
+        # Initialize Wallet Manager and MagicBlock Client
+        wm = WalletManager(user_id, config)
+        mb = MagicBlockClient(wm, config)
+        
+        # Show processing status
+        status_msg = await query.edit_message_text(
+            "🔒 *Initializing private payment via MagicBlock PER...*", 
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        try:
+            # Execute the real private transfer
+            # No link between sender and receiver will be visible on the main chain
+            result = await mb.private_transfer(
+                recipient=tx_data["recipient"],
+                amount=tx_data["amount"],
+                memo=tx_data.get("details", "Private Agent Order")
+            )
 
-        # Clear conversation context after payment
-        if context.user_data.get("pending_clear_on_confirm"):
-            clear_history(context)
-            context.user_data.pop("pending_clear_on_confirm", None)
-        context.user_data.pop("pending_tx", None)
+            # Success message
+            await status_msg.edit_text(
+                f"✅ *Payment Successful!*\n\n"
+                f"💵 Amount: `{tx_data['amount']} USDC`\n"
+                f"🛡️ Privacy: Confirmed in Private Rollup\n"
+                f"🔗 TX ID: `{result.get('tx_id', 'hidden')[:16]}...`",
+                parse_mode=ParseMode.MARKDOWN
+            )
 
-    elif data == "cancel_tx":
-        context.user_data.pop("pending_tx", None)
-        context.user_data.pop("pending_clear_on_confirm", None)
-        await query.edit_message_text("❌ Transaction cancelled.")
+            # Clear conversation context and pending data after successful purchase
+            context.user_data["history"] = []
+            context.user_data["pending_tx"] = None
 
-
+        except Exception as e:
+            # Error handling (e.g. insufficient private balance)
+            logger.error(f"Payment failed: {e}")
+            await status_msg.edit_text(
+                f"❌ *Payment Failed*\n\nReason: {str(e)}", 
+                parse_mode=ParseMode.MARKDOWN
+            )
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
