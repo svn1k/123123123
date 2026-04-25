@@ -10,7 +10,7 @@ Context lifecycle:
 
 import logging
 from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup,
+    Update, InlineKeyboardButton, InlineKeyboardMarkup, MessageEntity,
     ReplyKeyboardMarkup, KeyboardButton
 )
 from telegram.ext import (
@@ -83,7 +83,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not wallet_mgr.has_wallet():
         wallet = wallet_mgr.create_wallet()
-        # Welcome + wallet address (regular Markdown)
         await update.message.reply_text(
             f"\U0001f44b Welcome, *{user.first_name}*!\n\n"
             f"\U0001f195 New Solana wallet created:\n"
@@ -92,15 +91,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=main_keyboard()
         )
-        # Seed phrase as spoiler — MARKDOWN_V2 is required for ||spoiler|| syntax
-        import re
-        def _v2(t):
-            return re.sub(r"([_*\[\]()~`>#+=|{}.!\-])", r"\\\1", t)
+        # Seed phrase with spoiler via MessageEntity (no MarkdownV2 escaping needed)
+        prefix = "\u26a0\ufe0f Save your seed phrase — tap to reveal:\n\n"
+        suffix = "\n\n\U0001f512 Never share this with anyone. Delete this message after saving."
+        mnemonic = wallet['mnemonic']
+        full_text = prefix + mnemonic + suffix
         await update.message.reply_text(
-            "\u26a0\ufe0f *Save your seed phrase \\— tap to reveal:*\n\n"
-            f"||`{_v2(wallet['mnemonic'])}`||\n\n"
-            "_Never share this with anyone\\. Delete this message after saving\\._",
-            parse_mode=ParseMode.MARKDOWN_V2
+            full_text,
+            entities=[MessageEntity(
+                type=MessageEntity.SPOILER,
+                offset=len(prefix.encode('utf-16-le')) // 2,
+                length=len(mnemonic.encode('utf-16-le')) // 2,
+            )]
         )
     else:
         wallet = wallet_mgr.get_wallet_info()
