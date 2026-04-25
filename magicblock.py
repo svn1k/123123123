@@ -24,7 +24,27 @@ class MagicBlockClient:
         self._session_key: Optional[str] = None
         self._session_expiry: float = 0
         self.base_url = MAGICBLOCK_DEVNET_BASE if config.USE_DEVNET else MAGICBLOCK_API_BASE
-
+    async def get_balance(self) -> dict:
+    wallet = self.wallet_mgr.get_wallet_info()
+    
+    # Прямой запрос к Solana RPC (бесплатно)
+    async with httpx.AsyncClient() as http:
+        # Получить SOL баланс
+        resp = await http.post("https://api.mainnet-beta.solana.com", json={
+            "jsonrpc": "2.0", "id": 1,
+            "method": "getTokenAccountsByOwner",
+            "params": [
+                wallet["public_key"],
+                {"mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"},  # USDC mint
+                {"encoding": "jsonParsed"}
+            ]
+        })
+        data = resp.json()
+        usdc = 0.0
+        for acc in data.get("result", {}).get("value", []):
+            usdc += float(acc["account"]["data"]["parsed"]["info"]["tokenAmount"]["uiAmount"] or 0)
+    
+    return {"solana_usdc": usdc, "private_usdc": 0.0, "total": usdc, "demo_mode": False}
     async def _get_session(self) -> str:
         if self._session_key and time.time() < self._session_expiry:
             return self._session_key
