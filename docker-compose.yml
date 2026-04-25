@@ -11,21 +11,15 @@ services:
       - GITHUB_MODEL=${GITHUB_MODEL:-openai/gpt-4o}
       - USE_DEVNET=${USE_DEVNET:-true}
       - DEMO_MERCHANT_ADDRESS=${DEMO_MERCHANT_ADDRESS:-}
-      # Point storage to /app/data which is mounted as a persistent volume
       - WALLETS_DIR=/app/data/wallets
       - STORAGE_DIR=/app/data/history
     volumes:
-      # Named volume — survives container restarts, rebuilds, and re-deploys
-      - bot_data:/app/data
+      # Bind mount — data lives on the HOST at ./data/
+      # Survives: docker-compose up --build, restarts, image rebuilds
+      # Only deleted if you manually run: rm -rf ./data
+      - ./data:/app/data
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
-
-volumes:
-  bot_data:
-    driver: local
-    # Data lives at: /var/lib/docker/volumes/consumer-agent-bot_bot_data/_data
-    # To backup:  docker run --rm -v consumer-agent-bot_bot_data:/data -v $(pwd):/backup alpine tar czf /backup/wallets_backup.tar.gz /data
-    # To restore: docker run --rm -v consumer-agent-bot_bot_data:/data -v $(pwd):/backup alpine tar xzf /backup/wallets_backup.tar.gz -C /
