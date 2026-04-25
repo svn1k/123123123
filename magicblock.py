@@ -1,11 +1,21 @@
-# Измени в методе _demo_balance значения на 0.0
-async def _demo_balance(self) -> dict:
-    wallet = self.wallet_mgr.get_wallet_info()
-    # Было 100.0 и 50.0 -> Стало 0.0
-    demo_balance = wallet.get("demo_balance", {"solana": 0.0, "per": 0.0})
-    return {
-        "solana_usdc": demo_balance.get("solana", 0.0),
-        "private_usdc": demo_balance.get("per", 0.0),
-        "total": demo_balance.get("solana", 0.0) + demo_balance.get("per", 0.0),
-        "demo_mode": True
-    }
+import httpx, time, logging
+from config import Config
+
+config = Config()
+
+class MagicBlockClient:
+    def __init__(self, wallet_mgr):
+        self.wallet_mgr = wallet_mgr
+        self.base_url = "https://private-payments-api.magicblock.app"
+
+    async def get_balance(self):
+        try:
+            # В реальном API тут был бы запрос, в демо — возвращаем 0
+            wallet = self.wallet_mgr.get_wallet_info()
+            bal = wallet.get("demo_balance", {"solana": 0.0, "per": 0.0})
+            return {"solana_usdc": bal["solana"], "private_usdc": bal["per"], "total": bal["solana"]+bal["per"]}
+        except: return {"solana_usdc": 0.0, "private_usdc": 0.0, "total": 0.0}
+
+    async def private_transfer(self, recipient, amount, memo=""):
+        # Имитация успешной транзакции
+        return {"success": True, "tx_id": "SIM_" + str(int(time.time()))}

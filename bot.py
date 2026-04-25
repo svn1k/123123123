@@ -1,68 +1,84 @@
-"""
-🤖 Consumer Agent Bot
-"""
 import logging
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 from telegram.constants import ParseMode
 
 from config import Config
+from wallet import WalletManager
 from agent import ConsumerAgent
 from storage import SpendingStorage
-from wallet import WalletManager
+from magicblock import MagicBlockClient
 
 logging.basicConfig(level=logging.INFO)
 config = Config()
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
+def main_menu():
+    return ReplyKeyboardMarkup([['💬 Агент', '💰 Баланс'], ['📋 История', '⚙️ Кошелёк']], resize_keyboard=True)
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    wm = WalletManager(update.effective_user.id)
+    if not wm.has_wallet():
+        w = wm.create_wallet()
+        text = f"👋 Кошелёк создан!\nАдрес: `{w['public_key']}`"
+    else:
+        text = "👋 С возвращением! Я готов к вашим поручениям."
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=main_menu())
+
+async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     text = update.message.text
+    
+    # Кнопки меню
+    if text == "💰 Баланс":
+        b = await MagicBlockClient(WalletManager(user_id)).get_balance()
+        return await update.message.reply_text(f"💳 Баланс: {b['total']} USDC")
+    elif text == "📋 История":
+        h = SpendingStorage(user_id).get_history()
+        return await update.message.reply_text("История пуста" if not h else str(h))
 
-    # Инициализация истории
-    if 'history' not in context.user_data:
-        context.user_data['history'] = []
-
-    wallet_mgr = WalletManager(user_id)
-    storage = SpendingStorage(user_id)
-    agent = ConsumerAgent(user_id, wallet_mgr, storage)
-
-    thinking = await update.message.reply_text("🤔...")
+    # Работа с ИИ-Агентом
+    if 'history' not in context.user_data: context.user_data['history'] = []
+    
+    wait = await update.message.reply_text("🤔...")
+    agent = ConsumerAgent(user_id, WalletManager(user_id), SpendingStorage(user_id))
     
     try:
-        # Передаем старую историю в агент
-        result = await agent.process(text, chat_history=context.user_data['history'])
-        
-        # Сохраняем новую историю
-        context.user_data['history'] = result.get("new_history", [])
+        res = await agent.process(text, context.user_data['history'])
+        context.user_data['history'] = res['history']
 
-        if result.get("awaiting_confirmation"):
-            context.user_data["pending_tx"] = result.get("pending_tx_data")
+        kb = None
+        if "confirm_data" in res:
+            context.user_data['pending_tx'] = res['confirm_data']
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Подтвердить", callback_data="tx_ok"),
+                InlineKeyboardButton("❌ Отмена", callback_data="tx_no")
+            ]])
 
-        await thinking.edit_text(result["message"], parse_mode=ParseMode.MARKDOWN, reply_markup=result.get("keyboard"))
+        await wait.edit_text(res['text'], parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
     except Exception as e:
-        await thinking.edit_text(f"❌ Ошибка: {e}")
+        await wait.edit_text(f"❌ Ошибка: {e}")
 
-async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    data = query.data
-    user_id = str(query.from_user.id)
-
-    if data.startswith("confirm_tx:"):
-        tx_data = context.user_data.get("pending_tx")
-        if tx_data:
-            # Тут выполняется реальный перевод через mb_client...
-            # Если успешно:
-            await query.edit_message_text(f"✅ Оплачено {tx_data['amount']} USDC! Память агента очищена для новой задачи.")
+    
+    if query.data == "tx_ok":
+        tx = context.user_data.get('pending_tx')
+        if tx:
+            # Оплата
+            SpendingStorage(query.from_user.id).add_record("buy", tx['action'], tx['amount'])
             
-            # ОЧИСТКА КОНТЕКСТА ПОСЛЕ ОПЛАТЫ
+            # СТИРАЕМ ИСТОРИЮ ПОСЛЕ ОПЛАТЫ
             context.user_data['history'] = [] 
-            context.user_data.pop("pending_tx", None)
-        else:
-            await query.edit_message_text("❌ Ошибка: Транзакция не найдена.")
+            context.user_data.pop('pending_tx', None)
+            
+            await query.edit_message_text(f"✅ Успешно оплачено: {tx['amount']} USDC\nПамять очищена.")
+    elif query.data == "tx_no":
+        await query.edit_message_text("❌ Отменено. Контекст сохранен, можем продолжить.")
 
-    elif data == "cancel_tx":
-        # При отмене контекст НЕ стираем, чтобы пользователь мог уточнить детали
-        await query.edit_message_text("❌ Транзакция отменена. Вы можете продолжить обсуждение.")
-
-# (Остальные хендлеры: start, balance и запуск main - без изменений)
+if __name__ == "__main__":
+    app = Application.builder().token(config.TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(cb_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_msg))
+    app.run_polling()

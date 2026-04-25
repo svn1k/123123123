@@ -1,98 +1,62 @@
-"""
-WalletManager — Solana wallet creation, storage, and signing.
-"""
-import os
-import json
-import base64
-import logging
-import hashlib
-import secrets
+import os, json, base64, secrets, hashlib, logging
 from pathlib import Path
-from typing import Optional
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
 
-_B58_ALPHA = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+_B58 = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+def b58e(d):
+    l = len(d) - len(d.lstrip(b"\x00"))
+    n = int.from_bytes(d, "big")
+    res = []
+    while n: n, r = divmod(n, 58); res.append(_B58[r:r+1].decode())
+    return "1" * l + "".join(reversed(res))
 
-def _b58encode(data: bytes) -> str:
-    lead = len(data) - len(data.lstrip(b"\x00"))
-    num = int.from_bytes(data, "big")
-    result = []
-    while num:
-        num, rem = divmod(num, 58)
-        result.append(_B58_ALPHA[rem:rem+1].decode())
-    return "1" * lead + "".join(reversed(result))
-
-logger = logging.getLogger(__name__)
-WALLETS_DIR = Path(os.getenv("WALLETS_DIR", "./data/wallets"))
+WALLETS_DIR = Path("./data/wallets")
 WALLETS_DIR.mkdir(parents=True, exist_ok=True)
 
-def _derive_fernet_key(user_id: str, salt: bytes) -> bytes:
-    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=480000)
-    return base64.urlsafe_b64encode(kdf.derive(user_id.encode()))
-
 class WalletManager:
-    def __init__(self, user_id: str):
-        self.user_id = user_id
-        self.wallet_file = WALLETS_DIR / f"{user_id}.enc"
-        self._wallet_cache: Optional[dict] = None
+    def __init__(self, user_id):
+        self.user_id = str(user_id)
+        self.file = WALLETS_DIR / f"{self.user_id}.enc"
+        self.salt_file = WALLETS_DIR / f"{self.user_id}.salt"
 
-    def has_wallet(self) -> bool:
-        return self.wallet_file.exists()
+    def has_wallet(self): return self.file.exists()
 
-    def create_wallet(self) -> dict:
+    def create_wallet(self):
         try:
             from solders.keypair import Keypair
-            keypair = Keypair()
-            private_key_bytes = bytes(keypair)
-            public_key = str(keypair.pubkey())
-            private_key_b58 = _b58encode(private_key_bytes)
-        except ImportError:
-            private_key_bytes = secrets.token_bytes(64)
-            public_key = "Demo" + secrets.token_hex(16)
-            private_key_b58 = _b58encode(private_key_bytes)
-
-        wallet_data = {
-            "public_key": public_key,
-            "private_key_b58": private_key_b58,
-            "private_key_bytes": list(private_key_bytes),
-            "mnemonic": " ".join(secrets.choice(["apple", "banana", "cherry"]) for _ in range(12)),
-            "per_active": False,
-            "demo_balance": {"solana": 0.0, "per": 0.0}, # УСТАНОВЛЕНО 0.0
-            "created_at": _now()
+            kp = Keypair()
+            pk_bytes, pub = bytes(kp), str(kp.pubkey())
+        except:
+            pk_bytes, pub = secrets.token_bytes(64), "Demo" + secrets.token_hex(16)
+        
+        data = {
+            "public_key": pub,
+            "private_key_bytes": list(pk_bytes),
+            "private_key_b58": b58e(pk_bytes),
+            "mnemonic": " ".join(secrets.choice(["leaf", "ocean", "stone"]) for _ in range(12)),
+            "demo_balance": {"solana": 0.0, "per": 0.0} # Было 100, стало 0
         }
-        self._save_wallet(wallet_data)
-        self._wallet_cache = wallet_data
-        return {"public_key": public_key, "mnemonic": wallet_data["mnemonic"], "private_key_b58": private_key_b58}
-
-    def get_wallet_info(self) -> dict:
-        if self._wallet_cache: return self._wallet_cache
-        data = self._load_wallet()
-        self._wallet_cache = data
+        self._save(data)
         return data
 
-    def sign_message(self, message: str) -> str:
+    def get_wallet_info(self):
+        salt = self.salt_file.read_bytes()
+        kdf = PBKDF2HMAC(hashes.SHA256(), 32, salt, 480000)
+        key = base64.urlsafe_b64encode(kdf.derive(self.user_id.encode()))
+        return json.loads(Fernet(key).decrypt(self.file.read_bytes()).decode())
+
+    def sign_message(self, msg):
         try:
             from solders.keypair import Keypair
-            wallet = self.get_wallet_info()
-            keypair = Keypair.from_bytes(bytes(wallet["private_key_bytes"]))
-            return _b58encode(bytes(keypair.sign_message(message.encode())))
-        except:
-            return hashlib.sha256(f"{message}:{self.user_id}".encode()).hexdigest()
+            kp = Keypair.from_bytes(bytes(self.get_wallet_info()["private_key_bytes"]))
+            return b58e(bytes(kp.sign_message(msg.encode())))
+        except: return hashlib.sha256(msg.encode()).hexdigest()
 
-    def _save_wallet(self, data: dict):
-        salt_file = WALLETS_DIR / f"{self.user_id}.salt"
-        salt = salt_file.read_bytes() if salt_file.exists() else secrets.token_bytes(16)
-        if not salt_file.exists(): salt_file.write_bytes(salt)
-        f = Fernet(_derive_fernet_key(self.user_id, salt))
-        self.wallet_file.write_bytes(f.encrypt(json.dumps(data).encode()))
-
-    def _load_wallet(self) -> dict:
-        salt = (WALLETS_DIR / f"{self.user_id}.salt").read_bytes()
-        f = Fernet(_derive_fernet_key(self.user_id, salt))
-        return json.loads(f.decrypt(self.wallet_file.read_bytes()).decode())
-
-def _now():
-    from datetime import datetime
-    return datetime.utcnow().isoformat()
+    def _save(self, data):
+        salt = secrets.token_bytes(16)
+        self.salt_file.write_bytes(salt)
+        kdf = PBKDF2HMAC(hashes.SHA256(), 32, salt, 480000)
+        key = base64.urlsafe_b64encode(kdf.derive(self.user_id.encode()))
+        self.file.write_bytes(Fernet(key).encrypt(json.dumps(data).encode()))
