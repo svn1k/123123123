@@ -1,13 +1,13 @@
 """
 MagicBlock Private Payments API Client
-
-Demo balance fix: shows 0.0 (not fake 100 USDC) with clear demo mode label.
++ Real Solana RPC balance (no fake numbers)
 """
 
 import httpx
 import logging
 import base64
 import time
+import secrets
 from typing import Optional
 from config import Config
 
@@ -17,6 +17,14 @@ config = Config()
 MAGICBLOCK_API_BASE = "https://private-payments-api.magicblock.app"
 MAGICBLOCK_DEVNET_BASE = "https://private-payments-devnet.magicblock.app"
 
+# Solana USDC mint address (mainnet)
+USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+# Solana USDC mint address (devnet)
+USDC_MINT_DEVNET = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"
+
+SOLANA_RPC_MAINNET = "https://api.mainnet-beta.solana.com"
+SOLANA_RPC_DEVNET = "https://api.devnet.solana.com"
+
 
 class MagicBlockClient:
     def __init__(self, wallet_mgr):
@@ -24,28 +32,11 @@ class MagicBlockClient:
         self._session_key: Optional[str] = None
         self._session_expiry: float = 0
         self.base_url = MAGICBLOCK_DEVNET_BASE if config.USE_DEVNET else MAGICBLOCK_API_BASE
-    async def get_balance(self) -> dict:
-    wallet = self.wallet_mgr.get_wallet_info()
-    
-    # Прямой запрос к Solana RPC (бесплатно)
-    async with httpx.AsyncClient() as http:
-        # Получить SOL баланс
-        resp = await http.post("https://api.mainnet-beta.solana.com", json={
-            "jsonrpc": "2.0", "id": 1,
-            "method": "getTokenAccountsByOwner",
-            "params": [
-                wallet["public_key"],
-                {"mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"},  # USDC mint
-                {"encoding": "jsonParsed"}
-            ]
-        })
-        data = resp.json()
-        usdc = 0.0
-        for acc in data.get("result", {}).get("value", []):
-            usdc += float(acc["account"]["data"]["parsed"]["info"]["tokenAmount"]["uiAmount"] or 0)
-    
-    return {"solana_usdc": usdc, "private_usdc": 0.0, "total": usdc, "demo_mode": False}
+        self.rpc_url = SOLANA_RPC_DEVNET if config.USE_DEVNET else SOLANA_RPC_MAINNET
+        self.usdc_mint = USDC_MINT_DEVNET if config.USE_DEVNET else USDC_MINT
+
     async def _get_session(self) -> str:
+        """Get or refresh MagicBlock session key via challenge-response auth."""
         if self._session_key and time.time() < self._session_expiry:
             return self._session_key
 
@@ -62,7 +53,11 @@ class MagicBlockClient:
 
             resp = await http.post(
                 f"{self.base_url}/auth/session",
-                json={"public_key": wallet["public_key"], "challenge": challenge, "signature": signature}
+                json={
+                    "public_key": wallet["public_key"],
+                    "challenge": challenge,
+                    "signature": signature
+                }
             )
             resp.raise_for_status()
             data = resp.json()
@@ -78,28 +73,80 @@ class MagicBlockClient:
             "X-MagicBlock-Version": "1.0"
         }
 
+    async def _get_solana_usdc_balance(self, public_key: str) -> float:
+        """
+        Fetch real USDC balance directly from Solana RPC.
+        Free, no API key needed.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=15) as http:
+                resp = await http.post(
+                    self.rpc_url,
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "getTokenAccountsByOwner",
+                        "params": [
+                            public_key,
+                            {"mint": self.usdc_mint},
+                            {"encoding": "jsonParsed"}
+                        ]
+                    }
+                )
+                data = resp.json()
+                total = 0.0
+                for acc in data.get("result", {}).get("value", []):
+                    amount = acc["account"]["data"]["parsed"]["info"]["tokenAmount"].get("uiAmount") or 0
+                    total += float(amount)
+                return total
+        except Exception as e:
+            logger.warning(f"Solana RPC balance failed: {e}")
+            return 0.0
+
     async def get_balance(self) -> dict:
+        """
+        Get real USDC balance from Solana RPC.
+        Falls back to 0.0 (not fake numbers) if unavailable.
+        """
+        wallet = self.wallet_mgr.get_wallet_info()
+        public_key = wallet["public_key"]
+
+        # Skip RPC for demo/mock wallets (they start with "Demo")
+        if public_key.startswith("Demo"):
+            return {
+                "solana_usdc": 0.0,
+                "private_usdc": 0.0,
+                "total": 0.0,
+                "demo_mode": True
+            }
+
+        # Get real on-chain balance
+        solana_usdc = await self._get_solana_usdc_balance(public_key)
+
+        # Try to get Private PER balance from MagicBlock API
+        private_usdc = 0.0
         try:
             session = await self._get_session()
-            wallet = self.wallet_mgr.get_wallet_info()
-            async with httpx.AsyncClient(timeout=30) as http:
+            async with httpx.AsyncClient(timeout=15) as http:
                 resp = await http.get(
-                    f"{self.base_url}/balance/{wallet['public_key']}",
+                    f"{self.base_url}/balance/{public_key}",
                     headers=self._headers(session)
                 )
                 resp.raise_for_status()
                 data = resp.json()
-                return {
-                    "solana_usdc": data.get("solana_balance", 0.0),
-                    "private_usdc": data.get("per_balance", 0.0),
-                    "total": data.get("total_balance", 0.0),
-                    "demo_mode": False
-                }
+                private_usdc = data.get("per_balance", 0.0)
         except Exception as e:
-            logger.warning(f"Balance fetch failed: {e} — demo mode")
-            return self._demo_balance()
+            logger.warning(f"PER balance unavailable: {e}")
+
+        return {
+            "solana_usdc": solana_usdc,
+            "private_usdc": private_usdc,
+            "total": solana_usdc + private_usdc,
+            "demo_mode": False
+        }
 
     async def deposit_to_per(self, amount: float) -> dict:
+        """Delegate USDC from Solana into Private Ephemeral Rollup."""
         try:
             session = await self._get_session()
             wallet = self.wallet_mgr.get_wallet_info()
@@ -107,7 +154,11 @@ class MagicBlockClient:
                 resp = await http.post(
                     f"{self.base_url}/deposit",
                     headers=self._headers(session),
-                    json={"public_key": wallet["public_key"], "amount_usdc": amount, "delegate": True}
+                    json={
+                        "public_key": wallet["public_key"],
+                        "amount_usdc": amount,
+                        "delegate": True
+                    }
                 )
                 resp.raise_for_status()
                 return resp.json()
@@ -116,6 +167,7 @@ class MagicBlockClient:
             return self._demo_tx("deposit", amount)
 
     async def private_transfer(self, recipient: str, amount: float, memo: str = "") -> dict:
+        """Execute a private USDC transfer inside the PER (no on-chain sender/receiver link)."""
         try:
             session = await self._get_session()
             wallet = self.wallet_mgr.get_wallet_info()
@@ -147,6 +199,7 @@ class MagicBlockClient:
             return self._demo_tx("transfer", amount, recipient)
 
     async def withdraw_from_per(self, amount: float) -> dict:
+        """Withdraw USDC from Private PER back to Solana mainnet."""
         try:
             session = await self._get_session()
             wallet = self.wallet_mgr.get_wallet_info()
@@ -154,7 +207,10 @@ class MagicBlockClient:
                 resp = await http.post(
                     f"{self.base_url}/withdraw",
                     headers=self._headers(session),
-                    json={"public_key": wallet["public_key"], "amount_usdc": amount}
+                    json={
+                        "public_key": wallet["public_key"],
+                        "amount_usdc": amount
+                    }
                 )
                 resp.raise_for_status()
                 return resp.json()
@@ -163,23 +219,11 @@ class MagicBlockClient:
             return self._demo_tx("withdraw", amount)
 
     def _encrypt_recipient(self, recipient: str, sender_pubkey: str) -> str:
+        """Client-side encryption before sending to API (placeholder — use TEE key in prod)."""
         data = f"{recipient}:{sender_pubkey}".encode()
         return base64.b64encode(data).decode()
 
-    def _demo_balance(self) -> dict:
-        """
-        Real balance is 0 until user deposits on-chain.
-        Do NOT show fake numbers — that's misleading.
-        """
-        return {
-            "solana_usdc": 0.0,
-            "private_usdc": 0.0,
-            "total": 0.0,
-            "demo_mode": True  # caller shows ⚠️ demo note
-        }
-
     def _demo_tx(self, op: str, amount: float, recipient: str = "") -> dict:
-        import secrets
         tx_id = "DEMO_" + secrets.token_hex(16).upper()
         logger.info(f"[DEMO] {op}: {amount} USDC -> {recipient or 'PER'}")
         return {
