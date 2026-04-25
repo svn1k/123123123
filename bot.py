@@ -149,7 +149,7 @@ async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("⏳ Fetching balance...")
 
     from magicblock import MagicBlockClient
-    client = MagicBlockClient(wallet_mgr)
+    client = MagicBlockClient(wallet_mgr, config)
 
     try:
         balances = await client.get_balance()
@@ -327,7 +327,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # Initialize Wallet Manager and MagicBlock Client
-        wm = WalletManager(user_id, config)
+        from magicblock import MagicBlockClient
+        wm = WalletManager(user_id)
         mb = MagicBlockClient(wm, config)
         
         # Show processing status

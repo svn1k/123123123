@@ -160,7 +160,7 @@ class ConsumerAgent:
         self.user_id = user_id
         self.wallet_mgr = wallet_mgr
         self.storage = storage
-        self.mb_client = MagicBlockClient(wallet_mgr)
+        self.mb_client = MagicBlockClient(wallet_mgr, config)
 
     async def _call_api(self, messages: list) -> dict:
         headers = {
