@@ -1,177 +1,239 @@
-import httpx
-import logging
-import time
+"""
+MagicBlockClient — реальный клиент для Private Payments API.
+
+Документация: https://payments.magicblock.app/reference
+Базовый URL:  https://payments.magicblock.app/v1/spl/
+
+Архитектура:
+  API возвращает НЕПОДПИСАННЫЕ транзакции (base64).
+  Клиент подписывает их приватным ключом и отправляет в Solana RPC.
+  Авторизация через Bearer-токен НЕ нужна для этих эндпоинтов.
+"""
+
 import base64
+import logging
+import httpx
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+PAYMENTS_API = "https://payments.magicblock.app/v1/spl"
+
+# TEE validators
+DEVNET_VALIDATOR  = "MTEWGuqxUpYZGFJQcp8tLN7x5v9BSeoFHYWQQ3n3xzo"
+MAINNET_VALIDATOR = "MTEWGuqxUpYZGFJQcp8tLN7x5v9BSeoFHYWQQ3n3xzo"
+
+# USDC mints
+USDC_DEVNET  = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"
+USDC_MAINNET = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+
+# Solana RPC
+RPC_DEVNET  = "https://api.devnet.solana.com"
+RPC_MAINNET = "https://api.mainnet-beta.solana.com"
+
+USDC_DECIMALS = 6
+
+
+def _to_base_units(amount_usdc: float) -> int:
+    """Конвертирует USDC в базовые единицы (6 знаков)."""
+    return max(1, int(round(amount_usdc * 10 ** USDC_DECIMALS)))
+
+
+def _from_base_units(amount_raw, decimals: int = USDC_DECIMALS) -> float:
+    """Конвертирует базовые единицы обратно в USDC."""
+    try:
+        return int(amount_raw) / (10 ** decimals)
+    except Exception:
+        return 0.0
+
 
 class MagicBlockClient:
     def __init__(self, wallet_mgr, config):
         self.wallet_mgr = wallet_mgr
         self.config = config
-        
-        # Настройка эндпоинтов в зависимости от сети
+
         if config.USE_DEVNET:
-            self.base_url = "https://private-payments-devnet.magicblock.app"
-            self.rpc_url = "https://api.devnet.solana.com"
-            self.usdc_mint = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"
+            self.cluster   = "devnet"
+            self.mint      = USDC_DEVNET
+            self.validator = DEVNET_VALIDATOR
+            self.rpc_url   = RPC_DEVNET
         else:
-            self.base_url = "https://private-payments-api.magicblock.app"
-            self.rpc_url = "https://api.mainnet-beta.solana.com"
-            self.usdc_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+            self.cluster   = "mainnet"
+            self.mint      = USDC_MAINNET
+            self.validator = MAINNET_VALIDATOR
+            self.rpc_url   = RPC_MAINNET
 
-        self._session_key: Optional[str] = None
-        self._session_expiry: float = 0
+    # ── Helpers ───────────────────────────────────────────────────────────────
 
-    async def _get_session(self) -> str:
+    def _sign_and_send_tx(self, tx_base64: str) -> str:
         """
-        Аутентификация в MagicBlock через схему Challenge-Response.
-        Использует подпись сообщения приватным ключом пользователя.
+        Подписывает транзакцию приватным ключом кошелька
+        и отправляет в Solana RPC.
+        Возвращает TX signature (base58).
         """
-        # Если сессия еще жива, используем её
-        if self._session_key and time.time() < self._session_expiry:
-            return self._session_key
+        from solders.keypair import Keypair
+        from solders.transaction import Transaction
+        import httpx as _httpx
 
         wallet = self.wallet_mgr.get_wallet_info()
-        pubkey = wallet["public_key"]
+        keypair = Keypair.from_bytes(bytes(wallet["private_key_bytes"]))
 
-        async with httpx.AsyncClient(timeout=30) as http:
-            try:
-                # 1. Получаем уникальный челендж (строку для подписи)
-                resp = await http.post(f"{self.base_url}/auth/challenge", json={"public_key": pubkey})
-                resp.raise_for_status()
-                challenge = resp.json()["challenge"]
+        tx_bytes = base64.b64decode(tx_base64)
+        tx = Transaction.from_bytes(tx_bytes)
+        tx.sign([keypair])
 
-                # 2. Подписываем челендж через WalletManager
-                signature = self.wallet_mgr.sign_message(challenge)
+        signed_b64 = base64.b64encode(bytes(tx)).decode()
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "sendTransaction",
+            "params": [signed_b64, {"encoding": "base64", "preflightCommitment": "confirmed"}]
+        }
+        with _httpx.Client(timeout=30) as http:
+            r = http.post(self.rpc_url, json=payload)
+            r.raise_for_status()
+            result = r.json()
+            if "error" in result:
+                raise ValueError(f"Solana RPC error: {result['error']['message']}")
+            return result["result"]
 
-                # 3. Обмениваем подпись на сессионный JWT токен
-                resp = await http.post(
-                    f"{self.base_url}/auth/session",
-                    json={
-                        "public_key": pubkey,
-                        "challenge": challenge,
-                        "signature": signature
-                    }
-                )
-                resp.raise_for_status()
-                data = resp.json()
-
-                self._session_key = data["session_key"]
-                # Срок жизни сессии обычно 1 час
-                self._session_expiry = time.time() + data.get("expires_in", 3600) - 60
-                return self._session_key
-                
-            except Exception as e:
-                logger.error(f"MagicBlock Auth Error: {e}")
-                raise ConnectionError("Не удалось авторизоваться в системе MagicBlock.")
+    # ── Public API ────────────────────────────────────────────────────────────
 
     async def get_balance(self) -> dict:
         """
-        Возвращает баланс пользователя:
-        - solana_usdc: публичные средства в основной сети
-        - private_usdc: конфиденциальные средства внутри роллапа (PER)
+        Получает публичный и приватный балансы через реальный API.
+        GET /v1/spl/balance и GET /v1/spl/private-balance
         """
         wallet = self.wallet_mgr.get_wallet_info()
         pubkey = wallet["public_key"]
 
-        solana_usdc = 0.0
+        solana_usdc  = 0.0
         private_usdc = 0.0
+        demo_mode    = False
+
+        params = {"owner": pubkey, "mint": self.mint, "cluster": self.cluster}
 
         async with httpx.AsyncClient(timeout=15) as http:
-            # 1. Запрос баланса из публичного блокчейна Solana
+            # 1. Публичный баланс (base chain)
             try:
-                payload = {
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "getTokenAccountsByOwner",
-                    "params": [
-                        pubkey,
-                        {"mint": self.usdc_mint},
-                        {"encoding": "jsonParsed"}
-                    ]
-                }
-                r = await http.post(self.rpc_url, json=payload)
-                accounts = r.json().get("result", {}).get("value", [])
-                if accounts:
-                    info = accounts[0]["account"]["data"]["parsed"]["info"]
-                    solana_usdc = float(info["tokenAmount"]["uiAmount"])
-            except Exception as e:
-                logger.warning(f"Solana RPC Error: {e}")
-
-            # 2. Запрос баланса из приватного роллапа MagicBlock
-            try:
-                token = await self._get_session()
-                headers = {"Authorization": f"Bearer {token}"}
-                r = await http.get(f"{self.base_url}/balance/{pubkey}", headers=headers)
+                r = await http.get(f"{PAYMENTS_API}/balance", params=params)
                 r.raise_for_status()
-                private_usdc = r.json().get("balance", 0.0)
+                data = r.json()
+                solana_usdc = _from_base_units(data.get("balance", "0"),
+                                               data.get("decimals", USDC_DECIMALS))
             except Exception as e:
-                logger.warning(f"MagicBlock Balance Error: {e}")
+                logger.warning(f"Balance API error: {e}")
+                demo_mode = True
+
+            # 2. Приватный баланс (ephemeral rollup)
+            try:
+                r = await http.get(f"{PAYMENTS_API}/private-balance", params=params)
+                r.raise_for_status()
+                data = r.json()
+                private_usdc = _from_base_units(data.get("balance", "0"),
+                                                data.get("decimals", USDC_DECIMALS))
+            except Exception as e:
+                logger.warning(f"Private-balance API error: {e}")
+                demo_mode = True
 
         return {
-            "solana_usdc": solana_usdc,
+            "solana_usdc":  solana_usdc,
             "private_usdc": private_usdc,
-            "total": solana_usdc + private_usdc
+            "total":        solana_usdc + private_usdc,
+            "demo_mode":    demo_mode,
         }
 
     async def private_transfer(self, recipient: str, amount: float, memo: str = "") -> dict:
         """
-        Выполняет приватный перевод внутри роллапа.
-        Данные о транзакции скрыты внутри TEE (Intel TDX).
+        POST /v1/spl/transfer с privacy=private.
+        Строит транзакцию, подписывает, отправляет в Solana.
         """
-        token = await self._get_session()
         wallet = self.wallet_mgr.get_wallet_info()
+        pubkey = wallet["public_key"]
 
-        async with httpx.AsyncClient(timeout=60) as http:
-            headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-            payload = {
-                "sender": wallet["public_key"],
-                "recipient": recipient,
-                "amount": amount,
-                "memo": memo,
-                "is_private": True,
-                "aml_check": True # Автоматическая проверка на санкции
+        payload = {
+            "owner":       pubkey,
+            "destination": recipient,
+            "amount":      _to_base_units(amount),
+            "mint":        self.mint,
+            "cluster":     self.cluster,
+            "validator":   self.validator,
+            "privacy":     "private",
+        }
+        if memo:
+            payload["memo"] = memo
+
+        async with httpx.AsyncClient(timeout=30) as http:
+            r = await http.post(f"{PAYMENTS_API}/transfer", json=payload)
+            if r.status_code == 402:
+                raise ValueError("Insufficient private balance.")
+            r.raise_for_status()
+            tx_data = r.json()
+
+        try:
+            sig = self._sign_and_send_tx(tx_data["transactionBase64"])
+            return {"success": True, "tx_id": sig, "amount": amount}
+        except ImportError:
+            logger.warning("solders not available — returning unsigned tx")
+            return {
+                "success":           False,
+                "unsigned_tx":       tx_data["transactionBase64"],
+                "required_signers":  tx_data.get("requiredSigners", []),
+                "send_to":           tx_data.get("sendTo"),
+                "amount":            amount,
             }
-            
-            resp = await http.post(f"{self.base_url}/transfer", headers=headers, json=payload)
-            
-            if resp.status_code == 402:
-                raise ValueError("Недостаточно средств на приватном балансе.")
-            
-            resp.raise_for_status()
-            return resp.json() # Содержит tx_id роллапа
 
     async def deposit_to_per(self, amount: float) -> dict:
         """
-        Внесение средств (USDC) в приватный слой.
-        Блокирует USDC в Solana и выпускает их внутри роллапа.
+        POST /v1/spl/deposit — Solana base → ephemeral rollup.
         """
-        token = await self._get_session()
         wallet = self.wallet_mgr.get_wallet_info()
+        pubkey = wallet["public_key"]
 
-        async with httpx.AsyncClient(timeout=60) as http:
-            headers = {"Authorization": f"Bearer {token}"}
-            payload = {
-                "public_key": wallet["public_key"],
-                "amount": amount
-            }
-            resp = await http.post(f"{self.base_url}/deposit", headers=headers, json=payload)
-            resp.raise_for_status()
-            return resp.json()
+        payload = {
+            "owner":              pubkey,
+            "amount":             _to_base_units(amount),
+            "mint":               self.mint,
+            "cluster":            self.cluster,
+            "validator":          self.validator,
+            "initIfMissing":      True,
+            "initVaultIfMissing": True,
+        }
+
+        async with httpx.AsyncClient(timeout=30) as http:
+            r = await http.post(f"{PAYMENTS_API}/deposit", json=payload)
+            r.raise_for_status()
+            tx_data = r.json()
+
+        try:
+            sig = self._sign_and_send_tx(tx_data["transactionBase64"])
+            return {"success": True, "tx_id": sig, "amount": amount}
+        except ImportError:
+            return {"success": False, "unsigned_tx": tx_data["transactionBase64"], "amount": amount}
 
     async def withdraw_from_per(self, amount: float) -> dict:
-        """Вывод средств из приватного слоя обратно в публичную сеть Solana"""
-        token = await self._get_session()
+        """
+        POST /v1/spl/withdraw — ephemeral rollup → Solana base.
+        """
         wallet = self.wallet_mgr.get_wallet_info()
+        pubkey = wallet["public_key"]
 
-        async with httpx.AsyncClient(timeout=60) as http:
-            headers = {"Authorization": f"Bearer {token}"}
-            payload = {
-                "public_key": wallet["public_key"],
-                "amount": amount
-            }
-            resp = await http.post(f"{self.base_url}/withdraw", headers=headers, json=payload)
-            resp.raise_for_status()
-            return resp.json()
+        payload = {
+            "owner":      pubkey,
+            "mint":       self.mint,
+            "amount":     _to_base_units(amount),
+            "cluster":    self.cluster,
+            "validator":  self.validator,
+            "idempotent": True,
+        }
+
+        async with httpx.AsyncClient(timeout=30) as http:
+            r = await http.post(f"{PAYMENTS_API}/withdraw", json=payload)
+            r.raise_for_status()
+            tx_data = r.json()
+
+        try:
+            sig = self._sign_and_send_tx(tx_data["transactionBase64"])
+            return {"success": True, "tx_id": sig, "amount": amount}
+        except ImportError:
+            return {"success": False, "unsigned_tx": tx_data["transactionBase64"], "amount": amount}
