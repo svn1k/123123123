@@ -1,17 +1,5 @@
 """
 WalletManager — Solana wallet with Railway Variables persistence.
-
-Storage strategy (in priority order):
-  1. Railway Variables API  — survives all deploys (primary)
-  2. Local filesystem       — fallback for local dev / non-Railway
-
-Required env vars for Railway persistence:
-  RAILWAY_TOKEN          — Account token (Settings → Tokens → New Token)
-  RAILWAY_PROJECT_ID     — Copy from railway.com/project/<id>
-  RAILWAY_SERVICE_ID     — Service → Settings → Service ID
-  RAILWAY_ENVIRONMENT_ID — Usually "production" environment ID
-
-If those vars are absent, falls back to local ./data/wallets/ (works locally).
 """
 
 import os
@@ -21,7 +9,6 @@ import logging
 import hashlib
 import secrets
 import httpx
-import asyncio
 from pathlib import Path
 from typing import Optional
 from cryptography.fernet import Fernet
@@ -53,50 +40,58 @@ RAILWAY_ENV_ID    = os.getenv("RAILWAY_ENVIRONMENT_ID", "")
 def _railway_configured() -> bool:
     return all([RAILWAY_TOKEN, RAILWAY_PROJECT_ID, RAILWAY_SERVICE_ID, RAILWAY_ENV_ID])
 
-async def _railway_get(key: str) -> Optional[str]:
-    """Read a single variable from Railway."""
+def _railway_get(key: str) -> Optional[str]:
+    """Read a single variable from Railway (Synchronous)."""
     query = """
     query($projectId: String!, $serviceId: String!, $environmentId: String!) {
       variables(projectId: $projectId, serviceId: $serviceId, environmentId: $environmentId)
     }
     """
-    async with httpx.AsyncClient(timeout=15) as http:
-        resp = await http.post(
-            RAILWAY_API,
-            headers={"Authorization": f"Bearer {RAILWAY_TOKEN}", "Content-Type": "application/json"},
-            json={"query": query, "variables": {
-                "projectId": RAILWAY_PROJECT_ID,
-                "serviceId": RAILWAY_SERVICE_ID,
-                "environmentId": RAILWAY_ENV_ID,
-            }}
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        variables = data.get("data", {}).get("variables", {})
-        return variables.get(key)
+    try:
+        with httpx.Client(timeout=15) as http:
+            resp = http.post(
+                RAILWAY_API,
+                headers={"Authorization": f"Bearer {RAILWAY_TOKEN}", "Content-Type": "application/json"},
+                json={"query": query, "variables": {
+                    "projectId": RAILWAY_PROJECT_ID,
+                    "serviceId": RAILWAY_SERVICE_ID,
+                    "environmentId": RAILWAY_ENV_ID,
+                }}
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            variables = data.get("data", {}).get("variables", {})
+            return variables.get(key)
+    except Exception as e:
+        logger.error(f"Railway GET error: {e}")
+        return None
 
-async def _railway_set(key: str, value: str) -> bool:
-    """Upsert a variable in Railway (skipDeploys=True — no redeploy triggered)."""
+def _railway_set(key: str, value: str) -> bool:
+    """Upsert a variable in Railway (Synchronous)."""
     mutation = """
     mutation($input: VariableUpsertInput!) {
       variableUpsert(input: $input)
     }
     """
-    async with httpx.AsyncClient(timeout=15) as http:
-        resp = await http.post(
-            RAILWAY_API,
-            headers={"Authorization": f"Bearer {RAILWAY_TOKEN}", "Content-Type": "application/json"},
-            json={"query": mutation, "variables": {"input": {
-                "projectId": RAILWAY_PROJECT_ID,
-                "serviceId": RAILWAY_SERVICE_ID,
-                "environmentId": RAILWAY_ENV_ID,
-                "name": key,
-                "value": value,
-            }}}
-        )
-        resp.raise_for_status()
-        result = resp.json()
-        return result.get("data", {}).get("variableUpsert") is not False
+    try:
+        with httpx.Client(timeout=15) as http:
+            resp = http.post(
+                RAILWAY_API,
+                headers={"Authorization": f"Bearer {RAILWAY_TOKEN}", "Content-Type": "application/json"},
+                json={"query": mutation, "variables": {"input": {
+                    "projectId": RAILWAY_PROJECT_ID,
+                    "serviceId": RAILWAY_SERVICE_ID,
+                    "environmentId": RAILWAY_ENV_ID,
+                    "name": key,
+                    "value": value,
+                }}}
+            )
+            resp.raise_for_status()
+            result = resp.json()
+            return result.get("data", {}).get("variableUpsert") is not False
+    except Exception as e:
+        logger.error(f"Railway SET error: {e}")
+        return False
 
 # ── Encryption ────────────────────────────────────────────────────────────────
 WALLETS_DIR = Path(os.getenv("WALLETS_DIR", "./data/wallets"))
@@ -111,8 +106,6 @@ def _encrypt(data: dict, user_id: str, salt: bytes) -> bytes:
 
 def _decrypt(encrypted: bytes, user_id: str, salt: bytes) -> dict:
     return json.loads(Fernet(_derive_key(user_id, salt)).decrypt(encrypted).decode())
-
-
 class WalletManager:
     """
     Wallet storage with Railway Variables as primary backend.
@@ -132,13 +125,10 @@ class WalletManager:
         self._cache: Optional[dict] = None
 
     def has_wallet(self) -> bool:
-        """Check Railway first, then local filesystem."""
         if _railway_configured():
-            try:
-                val = asyncio.get_event_loop().run_until_complete(_railway_get(self._var_key))
-                return val is not None
-            except Exception as e:
-                logger.warning(f"Railway check failed: {e}, falling back to local")
+            val = _railway_get(self._var_key)
+            if val is not None:
+                return True
         return self._local_file.exists()
 
     def create_wallet(self) -> dict:
@@ -201,45 +191,32 @@ class WalletManager:
 
         saved_to_railway = False
         if _railway_configured():
-            try:
-                loop = asyncio.get_event_loop()
-                ok1 = loop.run_until_complete(_railway_set(self._var_key, encoded))
-                ok2 = loop.run_until_complete(_railway_set(self._salt_key, salt_hex))
-                saved_to_railway = ok1 and ok2
-                if saved_to_railway:
-                    logger.info(f"Wallet {self.user_id} saved to Railway Variables ✅")
-            except Exception as e:
-                logger.warning(f"Railway save failed: {e}")
+            ok1 = _railway_set(self._var_key, encoded)
+            ok2 = _railway_set(self._salt_key, salt_hex)
+            saved_to_railway = ok1 and ok2
+            if saved_to_railway:
+                logger.info(f"Wallet {self.user_id} saved to Railway Variables ✅")
 
-        # Always save locally as backup
         self._salt_file.write_text(salt_hex)
         self._local_file.write_bytes(encrypted)
-        if not saved_to_railway:
-            logger.info(f"Wallet {self.user_id} saved locally (Railway not configured)")
 
     def _load(self) -> dict:
-        # Try Railway first
         if _railway_configured():
-            try:
-                loop = asyncio.get_event_loop()
-                encoded = loop.run_until_complete(_railway_get(self._var_key))
-                salt_hex = loop.run_until_complete(_railway_get(self._salt_key))
-                if encoded and salt_hex:
-                    encrypted = base64.b64decode(encoded)
-                    salt = bytes.fromhex(salt_hex)
-                    data = _decrypt(encrypted, self.user_id, salt)
-                    logger.info(f"Wallet {self.user_id} loaded from Railway ✅")
-                    return data
-            except Exception as e:
-                logger.warning(f"Railway load failed: {e}, trying local")
+            encoded = _railway_get(self._var_key)
+            salt_hex = _railway_get(self._salt_key)
+            if encoded and salt_hex:
+                encrypted = base64.b64decode(encoded)
+                salt = bytes.fromhex(salt_hex)
+                data = _decrypt(encrypted, self.user_id, salt)
+                logger.info(f"Wallet {self.user_id} loaded from Railway ✅")
+                return data
 
-        # Fallback: local file
         if self._local_file.exists() and self._salt_file.exists():
             salt = bytes.fromhex(self._salt_file.read_text())
             encrypted = self._local_file.read_bytes()
             return _decrypt(encrypted, self.user_id, salt)
 
-        raise ValueError("Wallet not found in Railway or local storage")
+        raise ValueError("Wallet not found")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
