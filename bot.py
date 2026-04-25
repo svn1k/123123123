@@ -83,16 +83,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not wallet_mgr.has_wallet():
         wallet = wallet_mgr.create_wallet()
+        # Welcome + wallet address (regular Markdown)
         await update.message.reply_text(
-            f"👋 Welcome, *{user.first_name}*!\n\n"
-            f"🆕 New Solana wallet created:\n"
+            f"\U0001f44b Welcome, *{user.first_name}*!\n\n"
+            f"\U0001f195 New Solana wallet created:\n"
             f"`{wallet['public_key']}`\n\n"
-            f"⚠️ *Save your seed phrase:*\n"
-            f"||`{wallet['mnemonic']}`||\n\n"
-            f"_(tap to reveal)_\n\n"
             + agent_intro_text(),
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=main_keyboard()
+        )
+        # Seed phrase as spoiler — MARKDOWN_V2 is required for ||spoiler|| syntax
+        import re
+        def _v2(t):
+            return re.sub(r"([_*\[\]()~`>#+=|{}.!\-])", r"\\\1", t)
+        await update.message.reply_text(
+            "\u26a0\ufe0f *Save your seed phrase \\— tap to reveal:*\n\n"
+            f"||`{_v2(wallet['mnemonic'])}`||\n\n"
+            "_Never share this with anyone\\. Delete this message after saving\\._",
+            parse_mode=ParseMode.MARKDOWN_V2
         )
     else:
         wallet = wallet_mgr.get_wallet_info()
