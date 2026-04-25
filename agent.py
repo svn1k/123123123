@@ -240,7 +240,15 @@ class ConsumerAgent:
                         "keyboard": keyboard,
                         "history": history + new_messages,
                         "awaiting_confirmation": True,
-                        "clear_history_on_confirm": True  # caller clears after payment
+                        "clear_history_on_confirm": True,
+                        # Сохраняем всё что нужно для продолжения после подтверждения
+                        "pending_tx": {
+                            "tool_call_id": tool_call["id"],
+                            "action":       fn_args.get("action", ""),
+                            "amount":       fn_args.get("amount", 0),
+                            "details":      fn_args.get("details", ""),
+                            "messages":     messages,   # весь контекст для продолжения loop
+                        }
                     }
 
                 result = await self._execute_tool(fn_name, fn_args)
@@ -253,6 +261,49 @@ class ConsumerAgent:
                 new_messages.append(tool_msg)
 
         return {"message": "✅ Done.", "keyboard": None, "history": history + new_messages}
+
+    async def resume_after_confirmation(self, tool_call_id: str, messages: list, history: list) -> dict:
+        """
+        Продолжает agentic loop после того как пользователь подтвердил платёж.
+        Отправляет tool_result = "confirmed" для request_confirmation и продолжает.
+        """
+        # Добавляем результат подтверждения в контекст
+        messages = list(messages)
+        messages.append({
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": json.dumps({"confirmed": True}, ensure_ascii=False)
+        })
+
+        for _ in range(10):
+            data = await self._call_api(messages)
+            choice = data["choices"][0]
+            message = choice["message"]
+            messages.append(message)
+
+            if choice.get("finish_reason") == "stop" or not message.get("tool_calls"):
+                return {
+                    "message": message.get("content") or "✅ Payment completed.",
+                    "keyboard": None,
+                    "history": [],  # очищаем после оплаты
+                    "awaiting_confirmation": False
+                }
+
+            for tool_call in message["tool_calls"]:
+                fn_name = tool_call["function"]["name"]
+                try:
+                    fn_args = json.loads(tool_call["function"]["arguments"])
+                except json.JSONDecodeError:
+                    fn_args = {}
+
+                result = await self._execute_tool(fn_name, fn_args)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call["id"],
+                    "content": json.dumps(result, ensure_ascii=False)
+                })
+
+        return {"message": "✅ Payment completed.", "keyboard": None, "history": []}
 
     async def _execute_tool(self, tool_name: str, args: dict) -> dict:
         logger.info(f"Tool: {tool_name}({args})")
