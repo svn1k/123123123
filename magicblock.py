@@ -20,6 +20,10 @@ USDC_MAINNET = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 RPC_DEVNET  = "https://api.devnet.solana.com"
 RPC_MAINNET = "https://api.mainnet-beta.solana.com"
 
+# MagicBlock ephemeral validator RPC (для транзакций в rollup)
+EPHEMERAL_RPC_DEVNET  = "https://devnet.magicblock.app"
+EPHEMERAL_RPC_MAINNET = "https://mainnet.magicblock.app"
+
 USDC_DECIMALS = 6
 
 
@@ -40,15 +44,17 @@ class MagicBlockClient:
         self.config = config
 
         if config.USE_DEVNET:
-            self.cluster   = "devnet"
-            self.mint      = USDC_DEVNET
-            self.validator = DEVNET_VALIDATOR
-            self.rpc_url   = RPC_DEVNET
+            self.cluster          = "devnet"
+            self.mint             = USDC_DEVNET
+            self.validator        = DEVNET_VALIDATOR
+            self.rpc_url          = RPC_DEVNET
+            self.ephemeral_rpc_url = EPHEMERAL_RPC_DEVNET
         else:
-            self.cluster   = "mainnet"
-            self.mint      = USDC_MAINNET
-            self.validator = MAINNET_VALIDATOR
-            self.rpc_url   = RPC_MAINNET
+            self.cluster          = "mainnet"
+            self.mint             = USDC_MAINNET
+            self.validator        = MAINNET_VALIDATOR
+            self.rpc_url          = RPC_MAINNET
+            self.ephemeral_rpc_url = EPHEMERAL_RPC_MAINNET
 
     async def _get_balance_via_rpc(self, pubkey: str) -> float:
         """Fallback: USDC баланс через Solana JSON-RPC."""
@@ -67,11 +73,11 @@ class MagicBlockClient:
                 return float(ui) if ui else 0.0
         return 0.0
 
-    def _sign_and_send_tx(self, tx_base64: str) -> str:
+    def _sign_and_send_tx(self, tx_base64: str, send_to: str = "base") -> str:
         """
-        Подписывает транзакцию и отправляет в Solana RPC.
-        API возвращает уже частично подписанную транзакцию с blockhash —
-        нам нужно только добавить подпись кошелька и отправить как есть.
+        Подписывает транзакцию и отправляет в нужный RPC.
+        send_to="ephemeral" -> MagicBlock ephemeral validator RPC
+        send_to="base"      -> обычный Solana RPC
         """
         from solders.keypair import Keypair
         from solders.transaction import VersionedTransaction
@@ -82,29 +88,33 @@ class MagicBlockClient:
 
         tx_bytes = base64.b64decode(tx_base64)
 
-        # Пробуем как VersionedTransaction (современный формат)
+        # Подписываем транзакцию
         try:
             tx = VersionedTransaction.from_bytes(tx_bytes)
             tx = VersionedTransaction(tx.message, [keypair])
             signed_bytes = bytes(tx)
         except Exception:
-            # Fallback: legacy Transaction — подписываем через sign_message
             from solders.transaction import Transaction
-            from solders.hash import Hash
             tx = Transaction.from_bytes(tx_bytes)
-            # Получаем blockhash из самой транзакции
             blockhash = tx.message.recent_blockhash
             tx.sign([keypair], blockhash)
             signed_bytes = bytes(tx)
+
+        # Выбираем RPC в зависимости от sendTo
+        if send_to == "ephemeral":
+            rpc_url = self.ephemeral_rpc_url
+        else:
+            rpc_url = self.rpc_url
 
         signed_b64 = base64.b64encode(signed_bytes).decode()
         payload = {
             "jsonrpc": "2.0", "id": 1,
             "method": "sendTransaction",
-            "params": [signed_b64, {"encoding": "base64", "preflightCommitment": "confirmed"}]
+            "params": [signed_b64, {"encoding": "base64", "skipPreflight": True}]
         }
+        logger.info(f"Sending tx to {rpc_url} (sendTo={send_to})")
         with _httpx.Client(timeout=30) as http:
-            r = http.post(self.rpc_url, json=payload)
+            r = http.post(rpc_url, json=payload)
             r.raise_for_status()
             result = r.json()
             if "error" in result:
@@ -122,7 +132,7 @@ class MagicBlockClient:
         async with httpx.AsyncClient(timeout=15) as http:
             # 1. Публичный баланс — fallback на RPC если payments API недоступен
             try:
-                params = {"owner": pubkey, "mint": self.mint, "cluster": self.cluster}
+                params = {"address": pubkey, "mint": self.mint, "cluster": self.cluster}
                 r = await http.get(f"{PAYMENTS_API}/balance", params=params)
                 logger.info(f"Balance API: status={r.status_code} body={r.text[:200]}")
                 r.raise_for_status()
@@ -183,15 +193,9 @@ class MagicBlockClient:
                 raise ValueError(f"Transfer failed {r.status_code}: {r.text[:300]}")
             tx_data = r.json()
 
-        try:
-            sig = self._sign_and_send_tx(tx_data["transactionBase64"])
-            return {"success": True, "tx_id": sig, "amount": amount}
-        except ImportError:
-            return {
-                "success": False, "unsigned_tx": tx_data["transactionBase64"],
-                "required_signers": tx_data.get("requiredSigners", []),
-                "send_to": tx_data.get("sendTo"), "amount": amount,
-            }
+        send_to = tx_data.get("sendTo", "base")
+        sig = self._sign_and_send_tx(tx_data["transactionBase64"], send_to=send_to)
+        return {"success": True, "tx_id": sig, "amount": amount}
 
     async def deposit_to_per(self, amount: float) -> dict:
         wallet = self.wallet_mgr.get_wallet_info()
@@ -209,11 +213,9 @@ class MagicBlockClient:
             r.raise_for_status()
             tx_data = r.json()
 
-        try:
-            sig = self._sign_and_send_tx(tx_data["transactionBase64"])
-            return {"success": True, "tx_id": sig, "amount": amount}
-        except ImportError:
-            return {"success": False, "unsigned_tx": tx_data["transactionBase64"], "amount": amount}
+        send_to = tx_data.get("sendTo", "base")
+        sig = self._sign_and_send_tx(tx_data["transactionBase64"], send_to=send_to)
+        return {"success": True, "tx_id": sig, "amount": amount}
 
     async def withdraw_from_per(self, amount: float) -> dict:
         wallet = self.wallet_mgr.get_wallet_info()
@@ -230,8 +232,6 @@ class MagicBlockClient:
             r.raise_for_status()
             tx_data = r.json()
 
-        try:
-            sig = self._sign_and_send_tx(tx_data["transactionBase64"])
-            return {"success": True, "tx_id": sig, "amount": amount}
-        except ImportError:
-            return {"success": False, "unsigned_tx": tx_data["transactionBase64"], "amount": amount}
+        send_to = tx_data.get("sendTo", "base")
+        sig = self._sign_and_send_tx(tx_data["transactionBase64"], send_to=send_to)
+        return {"success": True, "tx_id": sig, "amount": amount}
