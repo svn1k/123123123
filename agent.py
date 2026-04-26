@@ -371,10 +371,14 @@ class ConsumerAgent:
                 }
 
             elif tool_name == "book_service":
-                merchant = self._normalize_solana_address(
-                    args.get("merchant_address") or config.DEMO_MERCHANT_ADDRESS,
-                    "merchant"
-                )
+                merchant = args.get("merchant_address") or config.DEMO_MERCHANT_ADDRESS
+                if merchant:
+                    merchant = self._normalize_solana_address(merchant, "merchant")
+                else:
+                    return {
+                        "success": False,
+                        "error": "No merchant address is available for this booking yet. Ask the user for a payment address or configure DEMO_MERCHANT_ADDRESS."
+                    }
                 amount = args["amount"]
                 result = await self._deposit_then_transfer(
                     amount=amount,
@@ -391,10 +395,14 @@ class ConsumerAgent:
                 return {"success": True, "booking_id": result.get("tx_id", "BK-DEMO"), "amount": amount, "network": self.network_label}
 
             elif tool_name == "buy_product":
-                merchant = self._normalize_solana_address(
-                    args.get("merchant_address") or config.DEMO_MERCHANT_ADDRESS,
-                    "merchant"
-                )
+                merchant = args.get("merchant_address") or config.DEMO_MERCHANT_ADDRESS
+                if merchant:
+                    merchant = self._normalize_solana_address(merchant, "merchant")
+                else:
+                    return {
+                        "success": False,
+                        "error": "No merchant address is available for this purchase yet. Ask the user for a payment address or configure DEMO_MERCHANT_ADDRESS."
+                    }
                 amount = args["amount"]
                 result = await self._deposit_then_transfer(
                     amount=amount,

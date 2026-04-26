@@ -139,7 +139,10 @@ class MagicBlockClient:
             accounts = raw.get("result", {}).get("value", [])
             logger.info(f"RPC token accounts for {pubkey[:8]}...: count={len(accounts)} raw={str(raw)[:300]}")
             if not accounts:
-                logger.warning(f"No USDC token account found for {pubkey[:8]}... (mint={self.mint}). Wallet may need devnet USDC airdrop.")
+                if self.use_devnet:
+                    logger.warning(f"No USDC token account found for {pubkey[:8]}... (mint={self.mint}). Wallet may need devnet USDC airdrop.")
+                else:
+                    logger.warning(f"No USDC token account found for {pubkey[:8]}... (mint={self.mint}). Wallet has no mainnet USDC associated token account.")
                 return 0.0
             ui = accounts[0]["account"]["data"]["parsed"]["info"]["tokenAmount"]["uiAmount"]
             logger.info(f"RPC USDC balance: {ui}")
@@ -248,6 +251,32 @@ class MagicBlockClient:
                 logger.warning(f"sendTransaction via {rpc_url} failed: {e}")
 
         raise ValueError(f"Unable to submit transaction: {last_error}")
+
+    def _sign_and_send_tx_base_single_path(self, tx_base64: str) -> str:
+        from solders.keypair import Keypair
+        from solders.transaction import VersionedTransaction
+
+        wallet = self.wallet_mgr.get_wallet_info()
+        keypair = Keypair.from_bytes(bytes(wallet["private_key_bytes"]))
+        tx_bytes = base64.b64decode(tx_base64)
+
+        try:
+            tx = VersionedTransaction.from_bytes(tx_bytes)
+            tx = VersionedTransaction(tx.message, [keypair])
+            signed_bytes = bytes(tx)
+        except Exception:
+            from solders.transaction import Transaction
+            tx = Transaction.from_bytes(tx_bytes)
+            blockhash = tx.message.recent_blockhash
+            tx.sign([keypair], blockhash)
+            signed_bytes = bytes(tx)
+
+        signed_b64 = base64.b64encode(signed_bytes).decode()
+        logger.info(f"Sending tx to {self.rpc_url} (sendTo=base, single-path)")
+        signature = self._send_raw_transaction(self.rpc_url, signed_b64)
+        logger.info(f"Submitted tx signature: {signature}")
+        self._confirm_signature(signature, [self.rpc_url], timeout_seconds=45)
+        return signature
 
     async def get_balance(self) -> dict:
         wallet = self.wallet_mgr.get_wallet_info()
@@ -405,7 +434,10 @@ class MagicBlockClient:
             tx_data = r.json()
 
         send_to = tx_data.get("sendTo", "base")
-        sig = self._sign_and_send_tx(tx_data["transactionBase64"], send_to=send_to)
+        if send_to == "base":
+            sig = self._sign_and_send_tx_base_single_path(tx_data["transactionBase64"])
+        else:
+            sig = self._sign_and_send_tx(tx_data["transactionBase64"], send_to=send_to)
         return {"success": True, "tx_id": sig, "amount": amount}
 
     async def withdraw_from_per(self, amount: float) -> dict:
@@ -425,5 +457,8 @@ class MagicBlockClient:
             tx_data = r.json()
 
         send_to = tx_data.get("sendTo", "base")
-        sig = self._sign_and_send_tx(tx_data["transactionBase64"], send_to=send_to)
+        if send_to == "base":
+            sig = self._sign_and_send_tx_base_single_path(tx_data["transactionBase64"])
+        else:
+            sig = self._sign_and_send_tx(tx_data["transactionBase64"], send_to=send_to)
         return {"success": True, "tx_id": sig, "amount": amount}
