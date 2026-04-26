@@ -308,11 +308,11 @@ class MagicBlockClient:
             logger.info(f"RPC USDC balance: {ui}")
             return float(ui) if ui else 0.0
 
-    def _send_raw_transaction(self, rpc_url: str, signed_b64: str) -> str:
+    def _send_raw_transaction(self, rpc_url: str, signed_b64: str, skip_preflight: bool = True) -> str:
         payload = {
             "jsonrpc": "2.0", "id": 1,
             "method": "sendTransaction",
-            "params": [signed_b64, {"encoding": "base64", "skipPreflight": True}]
+            "params": [signed_b64, {"encoding": "base64", "skipPreflight": skip_preflight}]
         }
         with httpx.Client(timeout=30) as http:
             r = http.post(rpc_url, json=payload)
@@ -398,10 +398,13 @@ class MagicBlockClient:
         last_error = None
         last_signature = None
         selected_validator = validator or self.validator
+        skip_preflight = send_to == "ephemeral"
         for rpc_url in submit_candidates:
             try:
-                logger.info(f"Sending tx to {rpc_url} (sendTo={send_to}, validator={selected_validator})")
-                signature = self._send_raw_transaction(rpc_url, signed_b64)
+                logger.info(
+                    f"Sending tx to {rpc_url} (sendTo={send_to}, validator={selected_validator}, skipPreflight={skip_preflight})"
+                )
+                signature = self._send_raw_transaction(rpc_url, signed_b64, skip_preflight=skip_preflight)
                 last_signature = signature
                 logger.info(f"Submitted tx signature: {signature}")
                 confirm_candidates = self._get_confirm_candidates_for_submit(send_to, rpc_url, validator=validator) or default_confirm_candidates
@@ -447,7 +450,7 @@ class MagicBlockClient:
 
         signed_b64 = base64.b64encode(signed_bytes).decode()
         logger.info(f"Sending tx to {self.rpc_url} (sendTo=base, single-path)")
-        signature = self._send_raw_transaction(self.rpc_url, signed_b64)
+        signature = self._send_raw_transaction(self.rpc_url, signed_b64, skip_preflight=False)
         logger.info(f"Submitted tx signature: {signature}")
         self._confirm_signature(signature, [self.rpc_url], timeout_seconds=45)
         return signature
