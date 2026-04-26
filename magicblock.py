@@ -161,13 +161,15 @@ class MagicBlockClient:
     async def private_transfer(self, recipient: str, amount: float, memo: str = "") -> dict:
         wallet = self.wallet_mgr.get_wallet_info()
         payload = {
-            "owner":       wallet["public_key"],
-            "destination": recipient,
+            "from":        wallet["public_key"],
+            "to":          recipient,
             "amount":      _to_base_units(amount),
             "mint":        self.mint,
             "cluster":     self.cluster,
             "validator":   self.validator,
-            "privacy":     "private",
+            "visibility":  "private",    # скрыть детали транзакции
+            "fromBalance": "ephemeral",  # списать с PER (ephemeral rollup)
+            "toBalance":   "ephemeral",  # зачислить получателю в PER
         }
         if memo:
             payload["memo"] = memo
@@ -194,7 +196,7 @@ class MagicBlockClient:
     async def deposit_to_per(self, amount: float) -> dict:
         wallet = self.wallet_mgr.get_wallet_info()
         payload = {
-            "owner":              wallet["public_key"],
+            "from":               wallet["public_key"],
             "amount":             _to_base_units(amount),
             "mint":               self.mint,
             "cluster":            self.cluster,
