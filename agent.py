@@ -148,6 +148,7 @@ RULES:
 4. ⚡ Be specific: show amounts, addresses, and details clearly
 5. 🛡️ All transfers go through Private PER — fully confidential
 6. 💡 DO NOT ask the user to deposit to PER manually — deposits happen AUTOMATICALLY before any transfer
+7. 📬 After a successful transfer: inform the recipient that funds arrive in their Private PER balance. They need to use the bot or call withdraw to move to their Solana wallet. Always mention the tx_id.
 7. 💰 Use the EXACT amount the user requested — never round up or change the amount
 8. 🌐 Devnet USDC is real USDC on Solana devnet — treat it as normal USDC
 
@@ -330,7 +331,7 @@ class ConsumerAgent:
                     tx_id=result.get("tx_id", ""),
                     metadata={"recipient": args["recipient"]}
                 )
-                return {"success": True, "tx_id": result.get("tx_id"), "amount": amount}
+                return {"success": True, "tx_id": result.get("tx_id"), "amount": amount, "note": "Funds sent to recipient PER balance. Recipient checks balance via bot or withdraws from PER."}
 
             elif tool_name == "book_service":
                 merchant = args.get("merchant_address", config.DEMO_MERCHANT_ADDRESS)
