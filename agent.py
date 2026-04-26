@@ -501,7 +501,7 @@ class ConsumerAgent:
             "wallet_username": "",
             "wallet_display_name": "",
             "is_internal_wallet": False,
-            "delivery_preference": "base",
+            "delivery_preference": "ephemeral",
         }
 
     def _resolve_saved_target(self, value: str, field_name: str = "recipient") -> dict:
@@ -878,16 +878,17 @@ class ConsumerAgent:
         except ValueError as e:
             err = str(e)
             if "402" in err or "nsufficien" in err or "insufficient" in err.lower():
+                retry_to_balance = "base" if to_balance == "ephemeral" else to_balance
                 logger.info(
                     f"Base-balance private transfer insufficient or unavailable; retrying from PER "
-                    f"with toBalance={to_balance}"
+                    f"with toBalance={retry_to_balance}"
                 )
                 return await self.mb_client.private_transfer(
                     recipient=recipient,
                     amount=amount,
                     memo=memo,
                     from_balance="ephemeral",
-                    to_balance=to_balance,
+                    to_balance=retry_to_balance,
                 )
             raise
 

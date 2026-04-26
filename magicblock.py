@@ -569,6 +569,9 @@ class MagicBlockClient:
         to_balance: str = "ephemeral",
     ) -> dict:
         wallet = self.wallet_mgr.get_wallet_info()
+        init_if_missing = to_balance == "ephemeral"
+        init_atas_if_missing = from_balance == "base"
+        init_vault_if_missing = from_balance == "base" and to_balance == "base"
         payload = {
             "from":        wallet["public_key"],
             "to":          recipient,
@@ -578,9 +581,9 @@ class MagicBlockClient:
             "visibility":  "private",
             "fromBalance": from_balance,
             "toBalance":   to_balance,
-            "initIfMissing": True,
-            "initAtasIfMissing": True,
-            "initVaultIfMissing": True,
+            "initIfMissing": init_if_missing,
+            "initAtasIfMissing": init_atas_if_missing,
+            "initVaultIfMissing": init_vault_if_missing,
         }
         if self.validator:
             payload["validator"] = self.validator
