@@ -68,7 +68,7 @@ class MagicBlockClient:
         if self.use_devnet:
             self.cluster          = "devnet"
             self.mint             = USDC_DEVNET
-            self.validator        = config.MAGICBLOCK_VALIDATOR or DEVNET_US_VALIDATOR
+            self.validator        = (config.MAGICBLOCK_VALIDATOR or "").strip() or None
             self.rpc_url          = RPC_DEVNET
             self.router_url       = ROUTER_DEVNET
             self.ephemeral_rpc_url = DEVNET_VALIDATOR_URLS.get(self.validator, EPHEMERAL_RPC_DEVNET)
@@ -76,7 +76,7 @@ class MagicBlockClient:
         else:
             self.cluster          = "mainnet"
             self.mint             = USDC_MAINNET
-            self.validator        = config.MAGICBLOCK_VALIDATOR or DEVNET_US_VALIDATOR
+            self.validator        = (config.MAGICBLOCK_VALIDATOR or "").strip() or None
             self.rpc_url          = RPC_MAINNET
             self.router_url       = ROUTER_MAINNET
             self.ephemeral_rpc_url = MAINNET_VALIDATOR_URLS.get(self.validator, EPHEMERAL_RPC_MAINNET)
@@ -269,7 +269,14 @@ class MagicBlockClient:
         logger.info(f"Mint transfer queue is not initialized for {self.mint}; initializing now")
         async with httpx.AsyncClient(timeout=30) as http:
             r = await http.post(f"{PAYMENTS_API}/initialize-mint", json=payload)
-            r.raise_for_status()
+            if r.status_code == 422:
+                logger.warning(
+                    "MagicBlock initialize-mint returned 422; continuing without explicit mint init. "
+                    f"payload={payload} body={r.text[:500]}"
+                )
+                return
+            if not r.is_success:
+                raise ValueError(f"Initialize mint failed {r.status_code}: {r.text[:300]}")
             tx_data = r.json()
 
         send_to = tx_data.get("sendTo", "base")
@@ -544,17 +551,12 @@ class MagicBlockClient:
         await self._initialize_mint_if_needed()
         wallet = self.wallet_mgr.get_wallet_info()
         payload = {
-            "from":        wallet["public_key"],
-            "to":          recipient,
+            "owner":       wallet["public_key"],
+            "destination": recipient,
             "amount":      _to_base_units(amount),
             "mint":        self.mint,
             "cluster":     self.cluster,
-            "visibility":  "private",
-            "fromBalance": "ephemeral",
-            "toBalance":   "ephemeral",
-            "initIfMissing": True,
-            "initAtasIfMissing": True,
-            "initVaultIfMissing": True,
+            "privacy":     "private",
         }
         if self.validator:
             payload["validator"] = self.validator
