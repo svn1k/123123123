@@ -148,18 +148,25 @@ class MagicBlockClient:
                     logger.warning(f"RPC fallback failed: {e2}")
                     demo_mode = True
 
-            # 2. Приватный баланс — API требует параметр "address", не "owner"
+            # 2. Приватный баланс — нужен validator чтобы знать какой роллап запрашивать
             try:
-                params_priv = {"address": pubkey, "mint": self.mint, "cluster": self.cluster}
+                params_priv = {
+                    "owner":     pubkey,
+                    "mint":      self.mint,
+                    "cluster":   self.cluster,
+                    "validator": self.validator,
+                }
                 r = await http.get(f"{PAYMENTS_API}/private-balance", params=params_priv)
-                logger.info(f"Private-balance API: status={r.status_code} body={r.text[:200]}")
-                r.raise_for_status()
-                data = r.json()
-                private_usdc = _from_base_units(
-                    data.get("balance", "0"), data.get("decimals", USDC_DECIMALS)
-                )
+                logger.info(f"Private-balance API: status={r.status_code} body={r.text[:300]}")
+                if r.is_success:
+                    data = r.json()
+                    private_usdc = _from_base_units(
+                        data.get("balance", "0"), data.get("decimals", USDC_DECIMALS)
+                    )
+                else:
+                    logger.warning(f"Private-balance non-2xx: {r.status_code} {r.text[:200]}")
             except Exception as e:
-                logger.warning(f"Private-balance API error: {e}")
+                logger.warning(f"Private-balance API error: {e}", exc_info=True)
 
         return {
             "solana_usdc":  solana_usdc,
@@ -179,7 +186,7 @@ class MagicBlockClient:
             "validator":   self.validator,
             "visibility":  "private",    # скрыть детали транзакции
             "fromBalance": "ephemeral",  # списать с PER (ephemeral rollup)
-            "toBalance":   "ephemeral",  # зачислить получателю в PER
+            "toBalance":   "solana",     # зачислить получателю в Solana-кошелёк (виден на-чейн)
         }
         if memo:
             payload["memo"] = memo
