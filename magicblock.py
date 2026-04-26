@@ -191,13 +191,13 @@ class MagicBlockClient:
                 private_tee_rpc,
             ])
         else:
-            submit_candidates = self._dedupe_urls([self.rpc_url, self.router_url])
-            confirm_candidates = self._dedupe_urls([self.rpc_url, self.router_url])
+            submit_candidates = self._dedupe_urls([self.router_url, self.rpc_url])
+            confirm_candidates = self._dedupe_urls([self.router_url, self.rpc_url])
         return submit_candidates, confirm_candidates
 
     def _get_confirm_candidates_for_submit(self, send_to: str, submit_url: str, validator: str | None = None) -> list[str]:
         if send_to != "ephemeral":
-            return self._dedupe_urls([submit_url, self.rpc_url, self.router_url])
+            return self._dedupe_urls([submit_url, self.router_url, self.rpc_url])
 
         target_rpc = self._get_ephemeral_rpc_for_validator(validator)
         private_tee_rpc = self._get_private_tee_rpc_url() if (validator or self.validator) == TEE_VALIDATOR else None
@@ -398,34 +398,44 @@ class MagicBlockClient:
         last_error = None
         last_signature = None
         selected_validator = validator or self.validator
-        skip_preflight = send_to == "ephemeral"
-        for rpc_url in submit_candidates:
-            try:
-                logger.info(
-                    f"Sending tx to {rpc_url} (sendTo={send_to}, validator={selected_validator}, skipPreflight={skip_preflight})"
-                )
-                signature = self._send_raw_transaction(rpc_url, signed_b64, skip_preflight=skip_preflight)
-                last_signature = signature
-                logger.info(f"Submitted tx signature: {signature}")
-                confirm_candidates = self._get_confirm_candidates_for_submit(send_to, rpc_url, validator=validator) or default_confirm_candidates
-                self._confirm_signature(signature, confirm_candidates)
-                return signature
-            except Exception as e:
-                last_error = e
-                logger.warning(f"sendTransaction via {rpc_url} failed: {e}")
-                err_lower = str(e).lower()
-                if "transaction failed on-chain" in err_lower:
-                    break
-                if ("already been processed" in err_lower or "already processed" in err_lower) and last_signature:
-                    try:
-                        confirm_candidates = self._get_confirm_candidates_for_submit(send_to, rpc_url, validator=validator) or default_confirm_candidates
-                        self._confirm_signature(last_signature, confirm_candidates)
-                        return last_signature
-                    except Exception as confirm_error:
-                        last_error = confirm_error
-                    break
-                if "submitted but" in err_lower:
-                    break
+        preflight_passes = [send_to == "ephemeral"]
+        if send_to != "ephemeral":
+            preflight_passes = [False, True]
+
+        for skip_preflight in preflight_passes:
+            for rpc_url in submit_candidates:
+                try:
+                    logger.info(
+                        f"Sending tx to {rpc_url} (sendTo={send_to}, validator={selected_validator}, skipPreflight={skip_preflight})"
+                    )
+                    signature = self._send_raw_transaction(rpc_url, signed_b64, skip_preflight=skip_preflight)
+                    last_signature = signature
+                    logger.info(f"Submitted tx signature: {signature}")
+                    confirm_candidates = self._get_confirm_candidates_for_submit(send_to, rpc_url, validator=validator) or default_confirm_candidates
+                    confirm_timeout = 90 if send_to == "base" else 60
+                    self._confirm_signature(signature, confirm_candidates, timeout_seconds=confirm_timeout)
+                    return signature
+                except Exception as e:
+                    last_error = e
+                    logger.warning(f"sendTransaction via {rpc_url} failed: {e}")
+                    err_lower = str(e).lower()
+                    if "transaction failed on-chain" in err_lower:
+                        break
+                    if ("already been processed" in err_lower or "already processed" in err_lower) and last_signature:
+                        try:
+                            confirm_candidates = self._get_confirm_candidates_for_submit(send_to, rpc_url, validator=validator) or default_confirm_candidates
+                            self._confirm_signature(last_signature, confirm_candidates, timeout_seconds=90 if send_to == "base" else 60)
+                            return last_signature
+                        except Exception as confirm_error:
+                            last_error = confirm_error
+                        break
+                    if "submitted but" in err_lower:
+                        break
+                    if "blockhash not found" not in err_lower:
+                        continue
+
+            if send_to == "ephemeral":
+                break
 
         raise ValueError(f"Unable to submit transaction: {last_error}")
 
@@ -449,11 +459,34 @@ class MagicBlockClient:
             signed_bytes = bytes(tx)
 
         signed_b64 = base64.b64encode(signed_bytes).decode()
-        logger.info(f"Sending tx to {self.rpc_url} (sendTo=base, single-path)")
-        signature = self._send_raw_transaction(self.rpc_url, signed_b64, skip_preflight=False)
-        logger.info(f"Submitted tx signature: {signature}")
-        self._confirm_signature(signature, [self.rpc_url], timeout_seconds=45)
-        return signature
+        submit_candidates = self._dedupe_urls([self.router_url, self.rpc_url])
+        last_error = None
+        last_signature = None
+
+        for skip_preflight in [False, True]:
+            for rpc_url in submit_candidates:
+                try:
+                    logger.info(f"Sending tx to {rpc_url} (sendTo=base, single-path, skipPreflight={skip_preflight})")
+                    signature = self._send_raw_transaction(rpc_url, signed_b64, skip_preflight=skip_preflight)
+                    last_signature = signature
+                    logger.info(f"Submitted tx signature: {signature}")
+                    self._confirm_signature(signature, self._dedupe_urls([rpc_url, self.router_url, self.rpc_url]), timeout_seconds=90)
+                    return signature
+                except Exception as e:
+                    last_error = e
+                    logger.warning(f"sendTransaction via {rpc_url} failed: {e}")
+                    err_lower = str(e).lower()
+                    if ("already been processed" in err_lower or "already processed" in err_lower) and last_signature:
+                        try:
+                            self._confirm_signature(last_signature, self._dedupe_urls([rpc_url, self.router_url, self.rpc_url]), timeout_seconds=90)
+                            return last_signature
+                        except Exception as confirm_error:
+                            last_error = confirm_error
+                        break
+                    if "blockhash not found" not in err_lower and "submitted but" in err_lower:
+                        break
+
+        raise ValueError(f"Unable to submit transaction: {last_error}")
 
     async def get_balance(self) -> dict:
         wallet = self.wallet_mgr.get_wallet_info()
