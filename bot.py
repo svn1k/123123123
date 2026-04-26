@@ -498,6 +498,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        save_contact_match = re.search(
+            r"^\s*save\s+(@?[A-Za-z0-9_]+)\s+as\s+([1-9A-HJ-NP-Za-km-z]{32,44})\s*$",
+            text,
+            re.IGNORECASE,
+        )
+        if save_contact_match:
+            alias = save_contact_match.group(1)
+            address = save_contact_match.group(2)
+            result = await agent._execute_tool("save_contact", {"alias": alias, "address": address})
+            if result.get("success"):
+                contact = result.get("contact", {})
+                await safe_edit_message_text(
+                    thinking_msg,
+                    decorate_with_network(
+                        (
+                            f"✅ Saved alias *{contact.get('alias', alias)}*\n\n"
+                            f"📍 Address: `{contact.get('address', address)}`"
+                        ),
+                        use_devnet,
+                    ),
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+            else:
+                await safe_edit_message_text(
+                    thinking_msg,
+                    decorate_with_network(f"❌ Could not save alias\n\n{result.get('error', 'Unknown error')}", use_devnet),
+                )
+            return
+
         deposit_match = re.search(r"(deposit|top up|topup|add)\s+(\d+(?:\.\d+)?)\s*usdc", lower_text)
         withdraw_match = re.search(r"(withdraw|cash out|cashout|move)\s+(\d+(?:\.\d+)?)\s*usdc", lower_text)
         if deposit_match and ("per" in lower_text or "private" in lower_text):

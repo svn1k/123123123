@@ -156,13 +156,13 @@ class MagicBlockClient:
         if send_to == "ephemeral":
             private_tee_rpc = self._get_private_tee_rpc_url()
             submit_candidates = self._dedupe_urls([
-                private_tee_rpc,
                 self.router_url,
+                private_tee_rpc,
                 self.ephemeral_rpc_url,
             ])
             confirm_candidates = self._dedupe_urls([
-                private_tee_rpc,
                 self.router_url,
+                private_tee_rpc,
                 self.ephemeral_rpc_url,
                 self.rpc_url,
             ])
@@ -170,6 +170,32 @@ class MagicBlockClient:
             submit_candidates = self._dedupe_urls([self.rpc_url, self.router_url])
             confirm_candidates = self._dedupe_urls([self.rpc_url, self.router_url])
         return submit_candidates, confirm_candidates
+
+    def _get_confirm_candidates_for_submit(self, send_to: str, submit_url: str) -> list[str]:
+        if send_to != "ephemeral":
+            return self._dedupe_urls([submit_url, self.rpc_url, self.router_url])
+
+        private_tee_rpc = self._get_private_tee_rpc_url()
+        if submit_url == self.router_url:
+            return self._dedupe_urls([
+                self.router_url,
+                self.rpc_url,
+                private_tee_rpc,
+                self.ephemeral_rpc_url,
+            ])
+        if submit_url == private_tee_rpc:
+            return self._dedupe_urls([
+                private_tee_rpc,
+                self.router_url,
+                self.rpc_url,
+                self.ephemeral_rpc_url,
+            ])
+        return self._dedupe_urls([
+            submit_url,
+            self.router_url,
+            self.rpc_url,
+            private_tee_rpc,
+        ])
 
     def _get_mint_init_params(self) -> dict:
         params = {
@@ -327,7 +353,7 @@ class MagicBlockClient:
             signed_bytes = bytes(tx)
 
         signed_b64 = base64.b64encode(signed_bytes).decode()
-        submit_candidates, confirm_candidates = self._get_rpc_candidates(send_to)
+        submit_candidates, default_confirm_candidates = self._get_rpc_candidates(send_to)
 
         last_error = None
         for rpc_url in submit_candidates:
@@ -335,6 +361,7 @@ class MagicBlockClient:
                 logger.info(f"Sending tx to {rpc_url} (sendTo={send_to})")
                 signature = self._send_raw_transaction(rpc_url, signed_b64)
                 logger.info(f"Submitted tx signature: {signature}")
+                confirm_candidates = self._get_confirm_candidates_for_submit(send_to, rpc_url) or default_confirm_candidates
                 self._confirm_signature(signature, confirm_candidates)
                 return signature
             except Exception as e:
