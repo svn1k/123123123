@@ -163,6 +163,24 @@ class ConsumerAgent:
         self.storage = storage
         self.mb_client = MagicBlockClient(wallet_mgr, config)
 
+    def _normalize_solana_address(self, value: str, field_name: str = "recipient") -> str:
+        address = "".join(str(value or "").split())
+        if not address:
+            raise ValueError(f"Missing {field_name} address.")
+
+        try:
+            from solders.pubkey import Pubkey
+            Pubkey.from_string(address)
+        except Exception:
+            allowed = set("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
+            if not (32 <= len(address) <= 44) or any(ch not in allowed for ch in address):
+                raise ValueError(
+                    f"Invalid {field_name} Solana address: {address}. "
+                    "Please send a valid base58 wallet address without spaces."
+                )
+
+        return address
+
     async def _call_api(self, messages: list) -> dict:
         headers = {
             "Authorization": f"Bearer {config.GITHUB_TOKEN}",
@@ -329,9 +347,10 @@ class ConsumerAgent:
 
             elif tool_name == "private_transfer":
                 amount = args["amount"]
+                recipient = self._normalize_solana_address(args["recipient"], "recipient")
                 result = await self._deposit_then_transfer(
                     amount=amount,
-                    recipient=args["recipient"],
+                    recipient=recipient,
                     memo=args.get("memo", "")
                 )
                 self.storage.add_record(
@@ -339,12 +358,15 @@ class ConsumerAgent:
                     description=args.get("memo", "Transfer"),
                     amount=amount,
                     tx_id=result.get("tx_id", ""),
-                    metadata={"recipient": args["recipient"]}
+                    metadata={"recipient": recipient}
                 )
                 return {"success": True, "tx_id": result.get("tx_id"), "amount": amount, "note": "Funds sent to recipient PER balance. Recipient checks balance via bot or withdraws from PER."}
 
             elif tool_name == "book_service":
-                merchant = args.get("merchant_address", config.DEMO_MERCHANT_ADDRESS)
+                merchant = self._normalize_solana_address(
+                    args.get("merchant_address") or config.DEMO_MERCHANT_ADDRESS,
+                    "merchant"
+                )
                 amount = args["amount"]
                 result = await self._deposit_then_transfer(
                     amount=amount,
@@ -361,7 +383,10 @@ class ConsumerAgent:
                 return {"success": True, "booking_id": result.get("tx_id", "BK-DEMO"), "amount": amount}
 
             elif tool_name == "buy_product":
-                merchant = args.get("merchant_address", config.DEMO_MERCHANT_ADDRESS)
+                merchant = self._normalize_solana_address(
+                    args.get("merchant_address") or config.DEMO_MERCHANT_ADDRESS,
+                    "merchant"
+                )
                 amount = args["amount"]
                 result = await self._deposit_then_transfer(
                     amount=amount,
