@@ -5,7 +5,7 @@ from dataclasses import dataclass
 class Config:
     TELEGRAM_TOKEN: str = os.getenv("TELEGRAM_TOKEN", "")
     GITHUB_TOKEN: str = os.getenv("GITHUB_TOKEN", "")
-    GITHUB_MODEL: str = os.getenv("GITHUB_MODEL", "openai/gpt-5")
+    GITHUB_MODEL: str = os.getenv("GITHUB_MODEL", "openai/gpt-4.1-mini")
     USE_DEVNET: bool = os.getenv("USE_DEVNET", "true").lower() == "true"
     DEMO_MERCHANT_ADDRESS: str = os.getenv("DEMO_MERCHANT_ADDRESS", "")
     MAGICBLOCK_VALIDATOR: str = os.getenv("MAGICBLOCK_VALIDATOR", "")
