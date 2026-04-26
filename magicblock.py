@@ -154,9 +154,11 @@ class MagicBlockClient:
 
         async with httpx.AsyncClient(timeout=30) as http:
             r = await http.post(f"{PAYMENTS_API}/transfer", json=payload)
+            logger.info(f"Transfer API: status={r.status_code} body={r.text[:500]}")
             if r.status_code == 402:
                 raise ValueError("Insufficient private balance.")
-            r.raise_for_status()
+            if not r.is_success:
+                raise ValueError(f"Transfer failed {r.status_code}: {r.text[:300]}")
             tx_data = r.json()
 
         try:
