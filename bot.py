@@ -156,7 +156,16 @@ async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pk = wallet_mgr.get_wallet_info()["public_key"]
         cluster = "devnet" if config.USE_DEVNET else "mainnet"
         solana_display = f"{balances['solana_usdc']:.4f} USDC"
-        private_display = f"{'~' if balances.get('per_estimated') else ''}{balances['private_usdc']:.4f} USDC"
+        private_source = balances.get("private_balance_source", "unavailable")
+        if private_source == "api":
+            private_display = f"{balances['private_usdc']:.4f} USDC"
+            per_note = ""
+        elif private_source == "history":
+            private_display = f"~{balances['private_usdc']:.4f} USDC"
+            per_note = " <i>(estimated from local history)</i>"
+        else:
+            private_display = "Unavailable"
+            per_note = " <i>(MagicBlock auth required)</i>"
         explorer_url = html_escape(
             balances.get(
                 "explorer_url",
@@ -177,7 +186,6 @@ async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Your address:\n{html_code(pk)}"
             )
 
-        per_note = " <i>(estimated)</i>" if balances.get("per_estimated") else ""
         await safe_edit_message_text(
             msg,
             f"💰 <b>Your Balance</b>\n\n"

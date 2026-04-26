@@ -5,6 +5,7 @@ https://payments.magicblock.app/reference
 
 import base64
 import logging
+import time
 import httpx
 
 logger = logging.getLogger(__name__)
@@ -91,6 +92,48 @@ class MagicBlockClient:
                 raise ValueError(f"Solana RPC error: {result['error'].get('message', result['error'])}")
             return result["result"]
 
+    def _get_signature_status(self, rpc_url: str, signature: str):
+        payload = {
+            "jsonrpc": "2.0", "id": 1,
+            "method": "getSignatureStatuses",
+            "params": [[signature], {"searchTransactionHistory": True}]
+        }
+        with httpx.Client(timeout=20) as http:
+            r = http.post(rpc_url, json=payload)
+            r.raise_for_status()
+            data = r.json()
+            values = data.get("result", {}).get("value", [])
+            return values[0] if values else None
+
+    def _confirm_signature(self, signature: str, timeout_seconds: int = 45):
+        rpc_candidates = [self.router_url, self.rpc_url]
+        deadline = time.time() + timeout_seconds
+        saw_pending = False
+
+        while time.time() < deadline:
+            for rpc_url in rpc_candidates:
+                try:
+                    status = self._get_signature_status(rpc_url, signature)
+                    if status is None:
+                        continue
+
+                    saw_pending = True
+                    if status.get("err"):
+                        raise ValueError(f"Transaction failed on-chain: {status['err']}")
+
+                    confirmation = status.get("confirmationStatus")
+                    if confirmation in {"confirmed", "finalized"}:
+                        logger.info(f"Transaction {signature} reached {confirmation} via {rpc_url}")
+                        return
+                except Exception as e:
+                    logger.warning(f"getSignatureStatuses via {rpc_url} failed: {e}")
+
+            time.sleep(2)
+
+        if saw_pending:
+            raise ValueError(f"Transaction {signature} was submitted but not confirmed within {timeout_seconds}s.")
+        raise ValueError(f"Transaction {signature} was submitted but not found on devnet within {timeout_seconds}s.")
+
     def _sign_and_send_tx(self, tx_base64: str, send_to: str = "base") -> str:
         """
         Подписывает транзакцию и отправляет в нужный RPC.
@@ -119,15 +162,15 @@ class MagicBlockClient:
 
         signed_b64 = base64.b64encode(signed_bytes).decode()
         rpc_candidates = [self.router_url]
-        if send_to == "ephemeral":
-            rpc_candidates.append(self.ephemeral_rpc_url)
         rpc_candidates.append(self.rpc_url)
 
         last_error = None
         for rpc_url in rpc_candidates:
             try:
                 logger.info(f"Sending tx to {rpc_url} (sendTo={send_to})")
-                return self._send_raw_transaction(rpc_url, signed_b64)
+                signature = self._send_raw_transaction(rpc_url, signed_b64)
+                self._confirm_signature(signature)
+                return signature
             except Exception as e:
                 last_error = e
                 logger.warning(f"sendTransaction via {rpc_url} failed: {e}")
@@ -142,6 +185,7 @@ class MagicBlockClient:
         private_usdc = 0.0
         api_per_ok   = False
         demo_mode    = False
+        has_local_per_activity = False
 
         async with httpx.AsyncClient(timeout=15) as http:
             # 1. Публичный баланс через RPC (самый надёжный для devnet)
@@ -196,6 +240,10 @@ class MagicBlockClient:
                 user_id = self.wallet_mgr.user_id
                 st = SpendingStorage(user_id)
                 records = st.get_history(limit=1000, period="all")
+                has_local_per_activity = any(
+                    r["type"] in ("deposit", "send", "booking", "purchase", "withdraw")
+                    for r in records
+                )
                 local_per = 0.0
                 for r in records:
                     if r["type"] == "deposit":
@@ -215,6 +263,11 @@ class MagicBlockClient:
             "total":        solana_usdc + private_usdc,
             "demo_mode":    demo_mode,
             "per_estimated": not api_per_ok,
+            "private_balance_source": (
+                "api" if api_per_ok else
+                "history" if has_local_per_activity else
+                "unavailable"
+            ),
             "needs_private_auth": not bool(self.config.MAGICBLOCK_AUTHORIZATION),
             "explorer_url": f"{explorer_base}/{wallet['public_key']}{cluster_param}",
         }
