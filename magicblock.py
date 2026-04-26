@@ -68,16 +68,36 @@ class MagicBlockClient:
         return 0.0
 
     def _sign_and_send_tx(self, tx_base64: str) -> str:
+        """
+        Подписывает транзакцию и отправляет в Solana RPC.
+        API возвращает уже частично подписанную транзакцию с blockhash —
+        нам нужно только добавить подпись кошелька и отправить как есть.
+        """
         from solders.keypair import Keypair
-        from solders.transaction import Transaction
+        from solders.transaction import VersionedTransaction
         import httpx as _httpx
 
         wallet = self.wallet_mgr.get_wallet_info()
         keypair = Keypair.from_bytes(bytes(wallet["private_key_bytes"]))
-        tx = Transaction.from_bytes(base64.b64decode(tx_base64))
-        tx.sign([keypair])
 
-        signed_b64 = base64.b64encode(bytes(tx)).decode()
+        tx_bytes = base64.b64decode(tx_base64)
+
+        # Пробуем как VersionedTransaction (современный формат)
+        try:
+            tx = VersionedTransaction.from_bytes(tx_bytes)
+            tx = VersionedTransaction(tx.message, [keypair])
+            signed_bytes = bytes(tx)
+        except Exception:
+            # Fallback: legacy Transaction — подписываем через sign_message
+            from solders.transaction import Transaction
+            from solders.hash import Hash
+            tx = Transaction.from_bytes(tx_bytes)
+            # Получаем blockhash из самой транзакции
+            blockhash = tx.message.recent_blockhash
+            tx.sign([keypair], blockhash)
+            signed_bytes = bytes(tx)
+
+        signed_b64 = base64.b64encode(signed_bytes).decode()
         payload = {
             "jsonrpc": "2.0", "id": 1,
             "method": "sendTransaction",
