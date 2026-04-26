@@ -793,7 +793,7 @@ class ConsumerAgent:
                             "_🔒 Payment is private via MagicBlock PER_"
                         ),
                         "keyboard": keyboard,
-                        "history": history + new_messages,
+                        "history": history,
                         "awaiting_confirmation": True,
                         "clear_history_on_confirm": True,
                         "pending_tx": {
@@ -836,7 +836,7 @@ class ConsumerAgent:
                 return {
                     "message": message.get("content") or "✅ Payment completed.",
                     "keyboard": None,
-                    "history": [],
+                    "history": history,
                     "awaiting_confirmation": False,
                 }
 
@@ -856,7 +856,7 @@ class ConsumerAgent:
                     }
                 )
 
-        return {"message": "✅ Payment completed.", "keyboard": None, "history": []}
+        return {"message": "✅ Payment completed.", "keyboard": None, "history": history}
 
     async def _deposit_then_transfer(self, amount: float, recipient_info: dict, memo: str) -> dict:
         recipient = recipient_info["address"]

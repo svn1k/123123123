@@ -6,6 +6,7 @@ import os
 import json
 import logging
 import base64
+import re
 import secrets
 import httpx
 from cryptography.fernet import Fernet
@@ -19,8 +20,8 @@ _B58 = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
 
 def _normalize_alias_key(value: str) -> str:
-    cleaned = "".join(str(value or "").strip().split()).lower()
-    return cleaned[1:] if cleaned.startswith("@") else cleaned
+    parts = re.findall(r"\w+", str(value or "").strip().lower(), flags=re.UNICODE)
+    return "".join(parts)
 
 def _b58encode(data: bytes) -> str:
     lead = len(data) - len(data.lstrip(b"\x00"))

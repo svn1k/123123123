@@ -10,6 +10,7 @@ Key principle: Your spending history stays YOURS.
 import base64
 import json
 import os
+import re
 import secrets
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -34,8 +35,8 @@ def iso_now() -> str:
 
 
 def normalize_alias(value: str) -> str:
-    cleaned = "".join(str(value or "").strip().split()).lower()
-    return cleaned[1:] if cleaned.startswith("@") else cleaned
+    parts = re.findall(r"\w+", str(value or "").strip().lower(), flags=re.UNICODE)
+    return "".join(parts)
 
 
 def period_cutoff(period: str) -> datetime:
@@ -254,6 +255,22 @@ class UserProfileStorage:
                 **self._default_profile()["risk_rules"],
                 **(data.get("risk_rules") or {}),
             }
+            profile["contacts"] = [
+                {
+                    **contact,
+                    "alias_key": normalize_alias((contact or {}).get("alias_key") or (contact or {}).get("alias")),
+                }
+                for contact in (data.get("contacts") or [])
+                if isinstance(contact, dict)
+            ]
+            profile["merchants"] = [
+                {
+                    **merchant,
+                    "alias_key": normalize_alias((merchant or {}).get("alias_key") or (merchant or {}).get("alias")),
+                }
+                for merchant in (data.get("merchants") or [])
+                if isinstance(merchant, dict)
+            ]
         return profile
 
     def _save_local_only(self, profile: dict):
