@@ -185,8 +185,12 @@ async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             private_display = f"~{balances['private_usdc']:.4f} USDC"
             per_note = " <i>(estimated from local history)</i>"
         else:
-            private_display = "Unavailable"
-            per_note = " <i>(MagicBlock auth required on mainnet)</i>" if not use_devnet else " <i>(not available on devnet)</i>"
+            if use_devnet:
+                private_display = f"~{balances['private_usdc']:.4f} USDC"
+                per_note = " <i>(estimated from local history)</i>"
+            else:
+                private_display = "Unavailable"
+                per_note = " <i>(MagicBlock auth required on mainnet)</i>"
         explorer_url = html_escape(
             balances.get(
                 "explorer_url",
