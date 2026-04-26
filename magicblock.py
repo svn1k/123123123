@@ -23,6 +23,7 @@ ROUTER_MAINNET = "https://router.magicblock.app"
 # MagicBlock ephemeral validator RPC (для транзакций в rollup)
 EPHEMERAL_RPC_DEVNET  = "https://devnet.magicblock.app"
 EPHEMERAL_RPC_MAINNET = "https://mainnet.magicblock.app"
+TEE_RPC_MAINNET = "https://mainnet-tee.magicblock.app"
 
 USDC_DECIMALS = 6
 
@@ -65,7 +66,64 @@ class MagicBlockClient:
         # Use MagicBlock authorization only on mainnet.
         if self.use_devnet:
             return ""
-        return self.config.MAGICBLOCK_AUTHORIZATION
+        if self.config.MAGICBLOCK_AUTHORIZATION:
+            return self.config.MAGICBLOCK_AUTHORIZATION
+        return self._ensure_authorization_token()
+
+    def _coerce_expiry_ms(self, value) -> int:
+        if isinstance(value, (int, float)):
+            return int(value)
+        if isinstance(value, str):
+            try:
+                return int(value)
+            except Exception:
+                pass
+        return int((time.time() + 60 * 60 * 24 * 30) * 1000)
+
+    def _ensure_authorization_token(self) -> str:
+        cached = self.wallet_mgr.get_magicblock_auth()
+        now_ms = int(time.time() * 1000)
+        token = cached.get("token")
+        expires_at = self._coerce_expiry_ms(cached.get("expires_at", 0))
+        if token and expires_at > now_ms + 5 * 60 * 1000:
+            return token
+
+        wallet = self.wallet_mgr.get_wallet_info()
+        pubkey = wallet["public_key"]
+
+        with httpx.Client(timeout=20) as http:
+            challenge_resp = http.get(f"{TEE_RPC_MAINNET}/auth/challenge", params={"pubkey": pubkey})
+            challenge_resp.raise_for_status()
+            challenge_json = challenge_resp.json()
+            challenge = challenge_json.get("challenge")
+            error = challenge_json.get("error")
+            if error:
+                raise ValueError(f"MagicBlock auth challenge failed: {error}")
+            if not challenge:
+                raise ValueError("MagicBlock auth challenge is empty.")
+
+            signature_b58 = self.wallet_mgr.sign_message(challenge)
+            auth_resp = http.post(
+                f"{TEE_RPC_MAINNET}/auth/login",
+                json={
+                    "pubkey": pubkey,
+                    "challenge": challenge,
+                    "signature": signature_b58,
+                },
+            )
+            auth_resp.raise_for_status()
+            auth_json = auth_resp.json()
+            if auth_resp.status_code != 200:
+                raise ValueError(f"MagicBlock auth failed: {auth_json.get('error', auth_json)}")
+
+            token = auth_json.get("token")
+            if not token:
+                raise ValueError("MagicBlock auth returned no token.")
+
+            expires_at = self._coerce_expiry_ms(auth_json.get("expiresAt"))
+            self.wallet_mgr.set_magicblock_auth(token, expires_at)
+            logger.info(f"Obtained MagicBlock mainnet auth token for {pubkey[:8]}...")
+            return token
 
     async def _get_balance_via_rpc(self, pubkey: str) -> float:
         """Fallback: USDC баланс через Solana JSON-RPC."""

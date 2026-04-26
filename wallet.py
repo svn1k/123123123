@@ -150,6 +150,19 @@ class WalletManager:
             return data
         raise ValueError("Wallet not found")
 
+    def get_magicblock_auth(self) -> dict:
+        wallet = self.get_wallet_info()
+        return wallet.get("magicblock_auth", {})
+
+    def set_magicblock_auth(self, token: str, expires_at: int):
+        wallet = self.get_wallet_info()
+        wallet["magicblock_auth"] = {
+            "token": token,
+            "expires_at": int(expires_at),
+        }
+        self._save_to_db(wallet)
+        self._cache = wallet
+
     def sign_message(self, message: str) -> str:
         try:
             from solders.keypair import Keypair
