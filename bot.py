@@ -3,6 +3,7 @@
 """
 
 import logging
+import re
 from html import escape as html_escape
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, MessageEntity,
@@ -352,6 +353,46 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         storage = SpendingStorage(user_id)
         agent = ConsumerAgent(user_id=user_id, wallet_mgr=wallet_mgr, storage=storage, use_devnet=use_devnet)
+
+        lower_text = text.lower()
+        deposit_match = re.search(r"(deposit|top up|topup|add)\s+(\d+(?:\.\d+)?)\s*usdc", lower_text)
+        withdraw_match = re.search(r"(withdraw|cash out|cashout|move)\s+(\d+(?:\.\d+)?)\s*usdc", lower_text)
+        if deposit_match and ("per" in lower_text or "private" in lower_text):
+            result = await agent._execute_tool("deposit_to_per", {"amount": float(deposit_match.group(2))})
+            if result.get("success"):
+                await safe_edit_message_text(
+                    thinking_msg,
+                    decorate_with_network(
+                        f"✅ Deposit submitted successfully\\.\n\n💵 Amount: *{float(result['amount']):.2f} USDC*\n🧾 Tx ID: `{result['tx_id']}`",
+                        use_devnet
+                    ),
+                    parse_mode=ParseMode.MARKDOWN_V2
+                )
+            else:
+                await safe_edit_message_text(
+                    thinking_msg,
+                    decorate_with_network(f"❌ Deposit failed\n\n{result.get('error', 'Unknown error')}", use_devnet)
+                )
+            return
+
+        if withdraw_match and ("per" in lower_text or "private" in lower_text):
+            result = await agent._execute_tool("withdraw_from_per", {"amount": float(withdraw_match.group(2))})
+            if result.get("success"):
+                await safe_edit_message_text(
+                    thinking_msg,
+                    decorate_with_network(
+                        f"✅ Withdraw submitted successfully\\.\n\n💵 Amount: *{float(result['amount']):.2f} USDC*\n🧾 Tx ID: `{result['tx_id']}`",
+                        use_devnet
+                    ),
+                    parse_mode=ParseMode.MARKDOWN_V2
+                )
+            else:
+                await safe_edit_message_text(
+                    thinking_msg,
+                    decorate_with_network(f"❌ Withdraw failed\n\n{result.get('error', 'Unknown error')}", use_devnet)
+                )
+            return
+
         history = get_history(context)
         result = await agent.process(text, history)
 

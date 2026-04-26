@@ -97,7 +97,7 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "deposit_to_per",
-            "description": "Delegate USDC into the Private Ephemeral Rollup to enable private transactions.",
+            "description": "Move USDC from the user's public Solana wallet into their private PER balance. Use this when the user says deposit, top up, add funds to PER, move funds to private balance, or 'deposit X USDC to PER'.",
             "parameters": {
                 "type": "object",
                 "properties": {"amount": {"type": "number", "description": "Amount in USDC"}},
@@ -109,7 +109,7 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "withdraw_from_per",
-            "description": "Withdraw USDC from Private PER back to Solana mainnet.",
+            "description": "Move USDC from the user's private PER balance back to their public Solana wallet. Use this when the user says withdraw, cash out from PER, move funds from private balance, or 'withdraw X USDC from PER'.",
             "parameters": {
                 "type": "object",
                 "properties": {"amount": {"type": "number", "description": "Amount in USDC"}},
@@ -152,6 +152,8 @@ RULES:
 7. 📬 After a successful transfer: inform the recipient that funds arrive in their Private PER balance. They need to use the bot or call withdraw to move to their Solana wallet. Always mention the tx_id.
 7. 💰 Use the EXACT amount the user requested — never round up or change the amount
 8. 🌐 Devnet USDC is real USDC on Solana devnet — treat it as normal USDC
+9. 🔁 If the user explicitly asks to deposit/top up/add funds to PER/private balance, call deposit_to_per
+10. 🔁 If the user explicitly asks to withdraw/move funds out of PER/private balance, call withdraw_from_per
 
 Respond in English. Use emojis. Markdown: *bold*, _italic_."""
 
