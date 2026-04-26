@@ -547,8 +547,7 @@ class MagicBlockClient:
             "explorer_url": f"{explorer_base}/{wallet['public_key']}{cluster_param}",
         }
 
-    async def private_transfer(self, recipient: str, amount: float, memo: str = "") -> dict:
-        await self._initialize_mint_if_needed()
+    async def _build_private_transfer(self, recipient: str, amount: float, memo: str = "", to_balance: str = "ephemeral") -> dict:
         wallet = self.wallet_mgr.get_wallet_info()
         payload = {
             "from":        wallet["public_key"],
@@ -558,7 +557,7 @@ class MagicBlockClient:
             "cluster":     self.cluster,
             "visibility":  "private",
             "fromBalance": "ephemeral",
-            "toBalance":   "ephemeral",
+            "toBalance":   to_balance,
             "initIfMissing": True,
             "initAtasIfMissing": True,
             "initVaultIfMissing": True,
@@ -575,18 +574,48 @@ class MagicBlockClient:
                 raise ValueError("Insufficient private balance.")
             if not r.is_success:
                 raise ValueError(f"Transfer failed {r.status_code}: {r.text[:300]}")
-            tx_data = r.json()
+            return r.json()
 
+    async def private_transfer(self, recipient: str, amount: float, memo: str = "") -> dict:
+        await self._initialize_mint_if_needed()
+
+        tx_data = await self._build_private_transfer(recipient=recipient, amount=amount, memo=memo, to_balance="ephemeral")
         send_to = tx_data.get("sendTo", "base")
         tx_validator = tx_data.get("validator") or self.validator
         logger.info(
             f"Private transfer prepared for validator={tx_validator} endpoint={self._get_ephemeral_rpc_for_validator(tx_validator)}"
         )
-        sig = self._sign_and_send_tx(
-            tx_data["transactionBase64"],
-            send_to=send_to,
-            validator=tx_validator,
-        )
+        try:
+            sig = self._sign_and_send_tx(
+                tx_data["transactionBase64"],
+                send_to=send_to,
+                validator=tx_validator,
+            )
+        except ValueError as e:
+            if "InvalidWritableAccount" not in str(e):
+                raise
+
+            logger.warning(
+                "Private transfer ephemeral->ephemeral failed with InvalidWritableAccount; "
+                "retrying as private ephemeral->base"
+            )
+            tx_data = await self._build_private_transfer(
+                recipient=recipient,
+                amount=amount,
+                memo=memo,
+                to_balance="base",
+            )
+            send_to = tx_data.get("sendTo", "base")
+            tx_validator = tx_data.get("validator") or self.validator
+            logger.info(
+                f"Private transfer fallback prepared for validator={tx_validator} endpoint={self._get_ephemeral_rpc_for_validator(tx_validator)}"
+            )
+            sig = self._sign_and_send_tx(
+                tx_data["transactionBase64"],
+                send_to=send_to,
+                validator=tx_validator,
+            )
+
         return {"success": True, "tx_id": sig, "amount": amount}
 
     async def deposit_to_per(self, amount: float) -> dict:
