@@ -1,14 +1,10 @@
 """
 ConsumerAgent — GitHub Models-powered autonomous agent.
-
-Key fixes:
-- Conversation history persists across messages (cleared only on payment)
-- All text in English
-- Demo balance shows 0 (not fake 100 USDC)
 """
 
 import json
 import logging
+import asyncio
 import httpx
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -35,7 +31,7 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "private_transfer",
-            "description": "Send a private USDC transfer via MagicBlock Private Ephemeral Rollup. No on-chain link between sender and receiver.",
+            "description": "Send a private USDC transfer via MagicBlock Private Ephemeral Rollup. Auto-deposits from Solana balance if PER balance is insufficient.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -151,6 +147,9 @@ RULES:
 3. 📊 Spending history is stored locally only, never shared with advertisers
 4. ⚡ Be specific: show amounts, addresses, and details clearly
 5. 🛡️ All transfers go through Private PER — fully confidential
+6. 💡 DO NOT ask the user to deposit to PER manually — deposits happen AUTOMATICALLY before any transfer
+7. 💰 Use the EXACT amount the user requested — never round up or change the amount
+8. 🌐 Devnet USDC is real USDC on Solana devnet — treat it as normal USDC
 
 Respond in English. Use emojis. Markdown: *bold*, _italic_."""
 
@@ -177,26 +176,26 @@ class ConsumerAgent:
             "temperature": 0.3,
             "max_tokens": 2048
         }
-        async with httpx.AsyncClient(timeout=60) as http:
-            resp = await http.post(GITHUB_MODELS_URL, headers=headers, json=payload)
-            resp.raise_for_status()
-            return resp.json()
+        # Retry при 429 (rate limit)
+        for attempt in range(3):
+            async with httpx.AsyncClient(timeout=60) as http:
+                resp = await http.post(GITHUB_MODELS_URL, headers=headers, json=payload)
+                if not resp.is_success:
+                    logger.error(f"GitHub Models API {resp.status_code}: {resp.text[:300]}")
+                if resp.status_code == 429:
+                    wait = 30 * (attempt + 1)
+                    logger.warning(f"Rate limited, waiting {wait}s (attempt {attempt+1}/3)")
+                    await asyncio.sleep(wait)
+                    continue
+                resp.raise_for_status()
+                return resp.json()
+        resp.raise_for_status()
+        return resp.json()
 
     async def process(self, user_message: str, history: list) -> dict:
-        """
-        Main agentic loop.
-
-        history: list of previous {"role": ..., "content": ...} messages.
-                 Persisted between calls, cleared only after confirmed payment.
-
-        Returns dict with keys:
-          message, keyboard, history (updated), awaiting_confirmation, clear_history_on_confirm
-        """
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         messages.extend(history)
         messages.append({"role": "user", "content": user_message})
-
-        # Track new messages added this turn to append to history
         new_messages = [{"role": "user", "content": user_message}]
 
         for _ in range(10):
@@ -207,9 +206,7 @@ class ConsumerAgent:
             messages.append(message)
             new_messages.append(message)
 
-            finish_reason = choice.get("finish_reason")
-
-            if finish_reason == "stop" or not message.get("tool_calls"):
+            if choice.get("finish_reason") == "stop" or not message.get("tool_calls"):
                 return {
                     "message": message.get("content") or "✅ Done.",
                     "keyboard": None,
@@ -241,13 +238,12 @@ class ConsumerAgent:
                         "history": history + new_messages,
                         "awaiting_confirmation": True,
                         "clear_history_on_confirm": True,
-                        # Сохраняем всё что нужно для продолжения после подтверждения
                         "pending_tx": {
                             "tool_call_id": tool_call["id"],
                             "action":       fn_args.get("action", ""),
                             "amount":       fn_args.get("amount", 0),
                             "details":      fn_args.get("details", ""),
-                            "messages":     messages,   # весь контекст для продолжения loop
+                            "messages":     messages,
                         }
                     }
 
@@ -263,11 +259,6 @@ class ConsumerAgent:
         return {"message": "✅ Done.", "keyboard": None, "history": history + new_messages}
 
     async def resume_after_confirmation(self, tool_call_id: str, messages: list, history: list) -> dict:
-        """
-        Продолжает agentic loop после того как пользователь подтвердил платёж.
-        Отправляет tool_result = "confirmed" для request_confirmation и продолжает.
-        """
-        # Добавляем результат подтверждения в контекст
         messages = list(messages)
         messages.append({
             "role": "tool",
@@ -285,7 +276,7 @@ class ConsumerAgent:
                 return {
                     "message": message.get("content") or "✅ Payment completed.",
                     "keyboard": None,
-                    "history": [],  # очищаем после оплаты
+                    "history": [],
                     "awaiting_confirmation": False
                 }
 
@@ -312,47 +303,86 @@ class ConsumerAgent:
                 return await self.mb_client.get_balance()
 
             elif tool_name == "private_transfer":
+                amount = args["amount"]
+                # Авто-депозит если PER баланс недостаточен
+                try:
+                    balance = await self.mb_client.get_balance()
+                    if balance["private_usdc"] < amount:
+                        needed = round(amount - balance["private_usdc"], 6)
+                        if balance["solana_usdc"] >= needed:
+                            logger.info(f"Auto-depositing {needed} USDC to PER")
+                            await self.mb_client.deposit_to_per(needed)
+                        else:
+                            return {
+                                "success": False,
+                                "error": f"Insufficient funds. Solana: {balance['solana_usdc']:.2f}, PER: {balance['private_usdc']:.2f}, need: {amount:.2f} USDC"
+                            }
+                except Exception as e:
+                    logger.warning(f"Auto-deposit check failed: {e}")
+
                 result = await self.mb_client.private_transfer(
                     recipient=args["recipient"],
-                    amount=args["amount"],
+                    amount=amount,
                     memo=args.get("memo", "")
                 )
                 self.storage.add_record(
                     type="send",
                     description=args.get("memo", "Transfer"),
-                    amount=args["amount"],
+                    amount=amount,
                     tx_id=result.get("tx_id", ""),
                     metadata={"recipient": args["recipient"]}
                 )
-                return {"success": True, "tx_id": result.get("tx_id"), "amount": args["amount"]}
+                return {"success": True, "tx_id": result.get("tx_id"), "amount": amount}
 
             elif tool_name == "book_service":
                 merchant = args.get("merchant_address", config.DEMO_MERCHANT_ADDRESS)
+                amount = args["amount"]
+                # Авто-депозит
+                try:
+                    balance = await self.mb_client.get_balance()
+                    if balance["private_usdc"] < amount:
+                        needed = round(amount - balance["private_usdc"], 6)
+                        if balance["solana_usdc"] >= needed:
+                            await self.mb_client.deposit_to_per(needed)
+                except Exception as e:
+                    logger.warning(f"Auto-deposit check failed: {e}")
+
                 result = await self.mb_client.private_transfer(
                     recipient=merchant,
-                    amount=args["amount"],
+                    amount=amount,
                     memo=f"Booking: {args['description']}"
                 )
                 self.storage.add_record(
                     type="booking",
                     description=args["description"],
-                    amount=args["amount"],
+                    amount=amount,
                     tx_id=result.get("tx_id", ""),
                     metadata={"service_type": args["service_type"]}
                 )
-                return {"success": True, "booking_id": result.get("tx_id", "BK-DEMO"), "amount": args["amount"]}
+                return {"success": True, "booking_id": result.get("tx_id", "BK-DEMO"), "amount": amount}
 
             elif tool_name == "buy_product":
                 merchant = args.get("merchant_address", config.DEMO_MERCHANT_ADDRESS)
+                amount = args["amount"]
+                # Авто-депозит
+                try:
+                    balance = await self.mb_client.get_balance()
+                    if balance["private_usdc"] < amount:
+                        needed = round(amount - balance["private_usdc"], 6)
+                        if balance["solana_usdc"] >= needed:
+                            await self.mb_client.deposit_to_per(needed)
+                except Exception as e:
+                    logger.warning(f"Auto-deposit check failed: {e}")
+
                 result = await self.mb_client.private_transfer(
                     recipient=merchant,
-                    amount=args["amount"],
+                    amount=amount,
                     memo=f"Purchase: {args['product_name']}"
                 )
                 self.storage.add_record(
                     type="purchase",
                     description=f"Purchase: {args['product_name']}",
-                    amount=args["amount"],
+                    amount=amount,
                     tx_id=result.get("tx_id", ""),
                     metadata={"store": args.get("store", "unknown")}
                 )
