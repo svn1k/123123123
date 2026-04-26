@@ -241,6 +241,60 @@ class MagicBlockClient:
             params["validator"] = self.validator
         return params
 
+    async def _get_private_balance_snapshot(self) -> dict:
+        wallet = self.wallet_mgr.get_wallet_info()
+        pubkey = wallet["public_key"]
+        params_priv = {
+            "owner": pubkey,
+            "address": pubkey,
+            "mint": self.mint,
+            "cluster": self.cluster,
+        }
+        headers_priv = {
+            "Authorization": f"Bearer {self.authorization_token}",
+            "X-Authorization": self.authorization_token,
+        }
+        async with httpx.AsyncClient(timeout=20) as http:
+            r = await http.get(
+                f"{PAYMENTS_API}/private-balance",
+                params=params_priv,
+                headers=headers_priv,
+            )
+            if not r.is_success:
+                raise ValueError(f"Private-balance failed {r.status_code}: {r.text[:200]}")
+            return r.json()
+
+    async def _get_delegation_status(self, account: str) -> dict:
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getDelegationStatus",
+            "params": [account],
+        }
+        async with httpx.AsyncClient(timeout=20) as http:
+            r = await http.post(self.router_url, json=payload)
+            r.raise_for_status()
+            data = r.json()
+            if data.get("error"):
+                raise ValueError(f"Delegation status error: {data['error']}")
+            return data.get("result") or {}
+
+    async def _resolve_private_validator(self) -> str | None:
+        try:
+            balance = await self._get_private_balance_snapshot()
+            ata = str(balance.get("ata") or "").strip()
+            if not ata:
+                return self.validator
+            status = await self._get_delegation_status(ata)
+            authority = ((status.get("delegationRecord") or {}).get("authority") or "").strip()
+            fqdn = str(status.get("fqdn") or "").strip()
+            if authority:
+                logger.info(f"Resolved private validator {authority} for ATA {ata[:8]}... fqdn={fqdn}")
+                return authority
+        except Exception as e:
+            logger.warning(f"Could not resolve private validator dynamically: {e}")
+        return self.validator
+
     async def _is_mint_initialized(self) -> bool:
         params = self._get_mint_init_params()
         async with httpx.AsyncClient(timeout=15) as http:
@@ -607,6 +661,7 @@ class MagicBlockClient:
         to_balance: str = "ephemeral",
     ) -> dict:
         wallet = self.wallet_mgr.get_wallet_info()
+        active_validator = await self._resolve_private_validator() if ("ephemeral" in {from_balance, to_balance}) else self.validator
         init_if_missing = to_balance == "ephemeral"
         init_atas_if_missing = from_balance == "base"
         init_vault_if_missing = from_balance == "base" and to_balance == "base"
@@ -623,8 +678,8 @@ class MagicBlockClient:
             "initAtasIfMissing": init_atas_if_missing,
             "initVaultIfMissing": init_vault_if_missing,
         }
-        if self.validator:
-            payload["validator"] = self.validator
+        if active_validator:
+            payload["validator"] = active_validator
         if memo:
             payload["memo"] = memo
 
@@ -671,6 +726,7 @@ class MagicBlockClient:
     async def deposit_to_per(self, amount: float) -> dict:
         await self._initialize_mint_if_needed()
         wallet = self.wallet_mgr.get_wallet_info()
+        active_validator = await self._resolve_private_validator()
         payload = {
             "owner":              wallet["public_key"],
             "amount":             _to_base_units(amount),
@@ -680,8 +736,8 @@ class MagicBlockClient:
             "initAtasIfMissing":  True,
             "initVaultIfMissing": True,
         }
-        if self.validator:
-            payload["validator"] = self.validator
+        if active_validator:
+            payload["validator"] = active_validator
         async with httpx.AsyncClient(timeout=30) as http:
             r = await http.post(f"{PAYMENTS_API}/deposit", json=payload)
             r.raise_for_status()
@@ -691,7 +747,7 @@ class MagicBlockClient:
         if send_to == "base":
             sig = self._sign_and_send_tx_base_single_path(tx_data["transactionBase64"])
         else:
-            tx_validator = tx_data.get("validator") or self.validator
+            tx_validator = tx_data.get("validator") or active_validator or self.validator
             logger.info(
                 f"Deposit prepared for validator={tx_validator} endpoint={self._get_ephemeral_rpc_for_validator(tx_validator)}"
             )
@@ -705,6 +761,7 @@ class MagicBlockClient:
     async def withdraw_from_per(self, amount: float) -> dict:
         await self._initialize_mint_if_needed()
         wallet = self.wallet_mgr.get_wallet_info()
+        active_validator = await self._resolve_private_validator()
         payload = {
             "owner":      wallet["public_key"],
             "mint":       self.mint,
@@ -712,8 +769,8 @@ class MagicBlockClient:
             "cluster":    self.cluster,
             "idempotent": True,
         }
-        if self.validator:
-            payload["validator"] = self.validator
+        if active_validator:
+            payload["validator"] = active_validator
         async with httpx.AsyncClient(timeout=30) as http:
             r = await http.post(f"{PAYMENTS_API}/withdraw", json=payload)
             r.raise_for_status()
@@ -723,7 +780,7 @@ class MagicBlockClient:
         if send_to == "base":
             sig = self._sign_and_send_tx_base_single_path(tx_data["transactionBase64"])
         else:
-            tx_validator = tx_data.get("validator") or self.validator
+            tx_validator = tx_data.get("validator") or active_validator or self.validator
             logger.info(
                 f"Withdraw prepared for validator={tx_validator} endpoint={self._get_ephemeral_rpc_for_validator(tx_validator)}"
             )
