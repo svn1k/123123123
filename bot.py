@@ -16,7 +16,7 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 from config import Config
 from agent import ConsumerAgent
-from storage import SpendingStorage
+from storage import SpendingStorage, UserProfileStorage
 from wallet import WalletManager
 from magicblock import MagicBlockClient
 
@@ -57,6 +57,50 @@ def decorate_with_network(message: str, use_devnet: bool) -> str:
     return f"🌐 *Network:* {network_name(use_devnet)}\n\n{message}"
 
 
+def confirmation_keyboard():
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Confirm", callback_data="confirm_tx:direct"),
+        InlineKeyboardButton("❌ Cancel", callback_data="cancel_tx"),
+    ]])
+
+
+def format_direct_tool_result(tool_name: str, result: dict) -> str:
+    if not result.get("success", False):
+        return f"❌ Operation failed\n\n{result.get('error', 'Unknown error')}"
+
+    if tool_name == "pay_payment_request":
+        warnings = result.get("warnings") or []
+        warning_text = ""
+        if warnings:
+            warning_text = "\n\n⚠️ Warnings:\n" + "\n".join(f"• {w}" for w in warnings)
+        return (
+            "✅ Payment request paid successfully.\n\n"
+            f"💵 Amount: *{float(result.get('amount', 0.0)):.2f} USDC*\n"
+            f"🧾 Invoice: `{result.get('invoice_id', 'unknown')}`\n"
+            f"🔗 Tx ID: `{result.get('tx_id', '')}`"
+            + warning_text
+        )
+
+    if tool_name == "run_due_recurring_payments":
+        payments = result.get("payments") or []
+        skipped = result.get("skipped") or []
+        lines = [
+            "✅ Recurring payments processed.",
+            "",
+            f"🔁 Processed: *{int(result.get('processed', 0))}*",
+        ]
+        for payment in payments[:5]:
+            lines.append(
+                f"• `{payment.get('recurring_id', '')}` — {float(payment.get('amount', 0.0)):.2f} USDC — `{payment.get('tx_id', '')}`"
+            )
+        if skipped:
+            lines.append("")
+            lines.append(f"⚠️ Skipped: *{len(skipped)}*")
+        return "\n".join(lines)
+
+    return "✅ Done."
+
+
 # ─── Keyboards ────────────────────────────────────────────────────────────────
 
 def main_keyboard():
@@ -73,11 +117,16 @@ def agent_intro_text():
         "Your private AI agent for purchases, bookings, and transfers.\n\n"
         "🔒 *Private payments* via MagicBlock Private Ephemeral Rollup\n"
         "🧠 *Intelligence* from GitHub Models (free)\n"
-        "📊 *Spending history* — yours only, not advertisers'\n\n"
+        "📊 *Spending history* — yours only, not advertisers'\n"
+        "🗂 *Contacts, merchants, invoices, recurring payments, budgets, risk rules*\n\n"
         "Example commands:\n"
+        "• `Save Alex as 9xQeWv...`\n"
+        "• `Create a 25 USDC payment request for dinner`\n"
+        "• `Set a weekly food budget of 80 USDC`\n"
+        "• `Create a monthly recurring payment of 15 USDC to rentwallet`\n"
         "• `Book a hotel in London for 3 nights`\n"
         "• `Buy a gift for ~50 USDC`\n"
-        "• `Send 10 USDC to address ABC...`\n"
+        "• `Send 10 USDC to Alex`\n"
         "• `Show my spending this week`\n\n"
         "💡 _Just write what you need_"
     )
@@ -154,6 +203,13 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/wallet — Wallet management\n"
         "/agent — Activate AI agent\n"
         "/clear — Clear conversation context\n\n"
+        "Examples:\n"
+        "• `Save Alice as SOLANA_ADDRESS`\n"
+        "• `Create a 12 USDC invoice for coffee`\n"
+        "• `Pay this request: PERPAY:...`\n"
+        "• `Create a weekly recurring payment of 8 USDC to Alice`\n"
+        "• `Set a monthly travel budget of 300 USDC`\n"
+        "• `Set max single payment to 50 USDC`\n\n"
         "🔒 *Privacy:* All transfers go through Private Ephemeral Rollup (PER) by MagicBlock.\n\n"
         "📊 *Spending history* is stored only locally.\n\n"
         "🧠 *AI:* GitHub Models (free inference)",
@@ -310,14 +366,20 @@ async def agent_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     history = get_history(context)
     status = f"📝 {len(history)} messages in context" if history else "🆕 Fresh context"
     use_devnet = get_use_devnet(context)
+    due_count = len(UserProfileStorage(str(update.effective_user.id)).get_due_recurring_payments())
+    due_note = f"⏰ Due recurring payments: *{due_count}*\n\n" if due_count else ""
     await update.message.reply_text(
         f"🤖 *Agent ready* — {status}\n\n"
         f"🌐 Network: *{network_name(use_devnet)}*\n\n"
+        f"{due_note}"
         "Tell me what to do:\n"
+        "• `Save Bob as ADDRESS`\n"
+        "• `Create a payment request for 18 USDC`\n"
+        "• `Run recurring payments`\n"
         "• `Book a hotel in Paris for 2 nights`\n"
         "• `Send 20 USDC to Alex`\n"
         "• `How much did I spend this month?`\n"
-        "• `Deposit 5 USDC to private balance`",
+        "• `Set a weekly shopping budget of 100 USDC`",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -353,8 +415,72 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         storage = SpendingStorage(user_id)
         agent = ConsumerAgent(user_id=user_id, wallet_mgr=wallet_mgr, storage=storage, use_devnet=use_devnet)
+        profile = UserProfileStorage(user_id)
 
         lower_text = text.lower()
+        payment_request_match = re.search(r"(PERPAY:[A-Za-z0-9_\-=]+)", text)
+        if payment_request_match:
+            try:
+                share_code = payment_request_match.group(1).strip()
+                payload = UserProfileStorage.decode_payment_request(share_code)
+                context.user_data["pending_tx"] = {
+                    "mode": "direct_tool",
+                    "tool_name": "pay_payment_request",
+                    "tool_args": {"share_code": share_code},
+                    "use_devnet": use_devnet,
+                }
+                details = (
+                    "⚠️ *Confirm Payment Request*\n\n"
+                    f"🧾 Invoice: `{payload.get('invoice_id', 'unknown')}`\n"
+                    f"🎯 Recipient: `{payload.get('recipient_alias') or payload.get('recipient_address', '')}`\n"
+                    f"📝 Description: {payload.get('description', 'Payment request')}\n"
+                    f"💵 Amount: *{float(payload.get('amount', 0.0)):.2f} USDC*"
+                )
+                await safe_edit_message_text(
+                    thinking_msg,
+                    decorate_with_network(details, use_devnet),
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=confirmation_keyboard(),
+                )
+                return
+            except Exception as e:
+                await safe_edit_message_text(
+                    thinking_msg,
+                    decorate_with_network(f"❌ Invalid payment request\n\n{str(e)}", use_devnet),
+                )
+                return
+
+        recurring_run_match = re.search(r"\b(run|process|pay)\s+(all\s+)?(due\s+)?recurring", lower_text)
+        if recurring_run_match:
+            due_items = profile.get_due_recurring_payments()
+            if not due_items:
+                await safe_edit_message_text(
+                    thinking_msg,
+                    decorate_with_network("ℹ️ No due recurring payments right now.", use_devnet),
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                return
+            total_amount = sum(float(item.get("amount", 0.0) or 0.0) for item in due_items)
+            context.user_data["pending_tx"] = {
+                "mode": "direct_tool",
+                "tool_name": "run_due_recurring_payments",
+                "tool_args": {},
+                "use_devnet": use_devnet,
+            }
+            details = (
+                "⚠️ *Confirm Recurring Payments*\n\n"
+                f"🔁 Due payments: *{len(due_items)}*\n"
+                f"💵 Total amount: *{total_amount:.2f} USDC*\n\n"
+                "Use this to process all currently due recurring payments."
+            )
+            await safe_edit_message_text(
+                thinking_msg,
+                decorate_with_network(details, use_devnet),
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=confirmation_keyboard(),
+            )
+            return
+
         deposit_match = re.search(r"(deposit|top up|topup|add)\s+(\d+(?:\.\d+)?)\s*usdc", lower_text)
         withdraw_match = re.search(r"(withdraw|cash out|cashout|move)\s+(\d+(?:\.\d+)?)\s*usdc", lower_text)
         if deposit_match and ("per" in lower_text or "private" in lower_text):
@@ -395,6 +521,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         history = get_history(context)
         result = await agent.process(text, history)
+        due_items = profile.get_due_recurring_payments()
 
         set_history(context, result.get("history", history))
 
@@ -403,9 +530,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             result["pending_tx"]["use_devnet"] = use_devnet
             context.user_data["pending_tx"] = result["pending_tx"]
 
+        message_text = result["message"]
+        if due_items and not result.get("awaiting_confirmation"):
+            message_text = (
+                f"⏰ You have {len(due_items)} due recurring payments. Say `Run recurring payments` to process them.\n\n"
+                f"{message_text}"
+            )
+
         await safe_edit_message_text(
             thinking_msg,
-            decorate_with_network(result["message"], use_devnet),
+            decorate_with_network(message_text, use_devnet),
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=result.get("keyboard")
         )
@@ -452,6 +586,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             storage = SpendingStorage(user_id)
             use_devnet = pending.get("use_devnet", get_use_devnet(context))
             agent = ConsumerAgent(user_id=user_id, wallet_mgr=wallet_mgr, storage=storage, use_devnet=use_devnet)
+
+            if pending.get("mode") == "direct_tool":
+                result = await agent._execute_tool(
+                    pending["tool_name"],
+                    pending.get("tool_args", {}),
+                )
+                context.user_data.pop("pending_tx", None)
+                await safe_edit_message_text(
+                    query.message,
+                    decorate_with_network(format_direct_tool_result(pending["tool_name"], result), use_devnet),
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                return
 
             result = await agent.resume_after_confirmation(
                 tool_call_id=pending["tool_call_id"],
