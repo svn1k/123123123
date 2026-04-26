@@ -287,12 +287,20 @@ class MagicBlockClient:
             if self.authorization_token:
                 try:
                     params_priv = {
+                        "owner": pubkey,
                         "address": pubkey,
                         "mint": self.mint,
                         "cluster": self.cluster,
-                        "authorization": self.authorization_token,
                     }
-                    r = await http.get(f"{PAYMENTS_API}/private-balance", params=params_priv)
+                    headers_priv = {
+                        "Authorization": f"Bearer {self.authorization_token}",
+                        "X-Authorization": self.authorization_token,
+                    }
+                    r = await http.get(
+                        f"{PAYMENTS_API}/private-balance",
+                        params=params_priv,
+                        headers=headers_priv,
+                    )
                     logger.info(f"Private-balance: status={r.status_code} body={r.text[:300]}")
                     if r.is_success:
                         data = r.json()

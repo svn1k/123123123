@@ -24,6 +24,7 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 config = Config()
 
 HISTORY_KEY = "chat_history"
