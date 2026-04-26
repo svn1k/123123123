@@ -5,6 +5,7 @@ ConsumerAgent — GitHub Models-powered autonomous agent.
 import json
 import logging
 import asyncio
+from telegram.helpers import escape_markdown
 import httpx
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -221,17 +222,19 @@ class ConsumerAgent:
                     fn_args = {}
 
                 if fn_name == "request_confirmation":
+                    action = escape_markdown(str(fn_args.get("action", "")), version=2)
+                    details = escape_markdown(str(fn_args.get("details", "")), version=2)
                     keyboard = InlineKeyboardMarkup([[
                         InlineKeyboardButton("✅ Confirm", callback_data=f"confirm_tx:{tool_call['id']}"),
                         InlineKeyboardButton("❌ Cancel", callback_data="cancel_tx"),
                     ]])
                     return {
                         "message": (
-                            f"⚠️ *Confirm Payment*\n\n"
-                            f"🎯 *{fn_args.get('action', '')}*\n\n"
-                            f"{fn_args.get('details', '')}\n\n"
-                            f"💵 Amount: *{fn_args.get('amount', 0):.2f} USDC*\n\n"
-                            f"_🔒 Payment is private via MagicBlock PER_"
+                            "⚠️ *Confirm Payment*\n\n"
+                            f"🎯 *{action}*\n\n"
+                            f"{details}\n\n"
+                            f"💵 Amount: *{float(fn_args.get('amount', 0)):.2f} USDC*\n\n"
+                            "_🔒 Payment is private via MagicBlock PER_"
                         ),
                         "keyboard": keyboard,
                         "history": history + new_messages,
@@ -382,10 +385,26 @@ class ConsumerAgent:
                 return {"records": records[:20], "stats": self.storage.get_stats()}
 
             elif tool_name == "deposit_to_per":
-                return await self.mb_client.deposit_to_per(args["amount"])
+                amount = args["amount"]
+                result = await self.mb_client.deposit_to_per(amount)
+                self.storage.add_record(
+                    type="deposit",
+                    description="Manual deposit to PER",
+                    amount=amount,
+                    tx_id=result.get("tx_id", ""),
+                )
+                return result
 
             elif tool_name == "withdraw_from_per":
-                return await self.mb_client.withdraw_from_per(args["amount"])
+                amount = args["amount"]
+                result = await self.mb_client.withdraw_from_per(amount)
+                self.storage.add_record(
+                    type="withdraw",
+                    description="Withdraw from PER",
+                    amount=amount,
+                    tx_id=result.get("tx_id", ""),
+                )
+                return result
 
             else:
                 return {"error": f"Unknown tool: {tool_name}"}

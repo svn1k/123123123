@@ -142,7 +142,7 @@ class MagicBlockClient:
                 logger.warning(f"RPC balance failed: {e}")
                 # Fallback на MagicBlock balance API
                 try:
-                    params = {"address": pubkey, "mint": self.mint, "cluster": self.cluster}
+                    params = {"owner": pubkey, "mint": self.mint, "cluster": self.cluster}
                     r = await http.get(f"{PAYMENTS_API}/balance", params=params)
                     logger.info(f"Balance API: status={r.status_code} body={r.text[:200]}")
                     if r.is_success:
@@ -156,30 +156,25 @@ class MagicBlockClient:
                     logger.warning(f"Balance API also failed: {e2}")
                     demo_mode = True
 
-            # 2. Приватный баланс — пробуем owner и address
-            for pk_field in ("owner", "address"):
-                try:
-                    params_priv = {
-                        pk_field:    pubkey,
-                        "mint":      self.mint,
-                        "cluster":   self.cluster,
-                        "validator": self.validator,
-                    }
-                    r = await http.get(f"{PAYMENTS_API}/private-balance", params=params_priv)
-                    logger.info(f"Private-balance ({pk_field}): status={r.status_code} body={r.text[:300]}")
-                    if r.is_success:
-                        data = r.json()
-                        val = _from_base_units(
-                            data.get("balance", "0"), data.get("decimals", USDC_DECIMALS)
-                        )
-                        if val > 0:
-                            private_usdc = val
-                            api_per_ok = True
-                        break
-                    else:
-                        logger.warning(f"Private-balance ({pk_field}) non-2xx: {r.status_code} {r.text[:200]}")
-                except Exception as e:
-                    logger.warning(f"Private-balance ({pk_field}) error: {e}")
+            # 2. Приватный баланс
+            try:
+                params_priv = {
+                    "owner": pubkey,
+                    "mint": self.mint,
+                    "cluster": self.cluster,
+                }
+                r = await http.get(f"{PAYMENTS_API}/private-balance", params=params_priv)
+                logger.info(f"Private-balance: status={r.status_code} body={r.text[:300]}")
+                if r.is_success:
+                    data = r.json()
+                    private_usdc = _from_base_units(
+                        data.get("balance", "0"), data.get("decimals", USDC_DECIMALS)
+                    )
+                    api_per_ok = True
+                else:
+                    logger.warning(f"Private-balance non-2xx: {r.status_code} {r.text[:200]}")
+            except Exception as e:
+                logger.warning(f"Private-balance error: {e}")
 
         # 3. Если API вернул 0 для PER — считаем локально из истории storage
         #    deposit увеличивает PER, withdraw/send уменьшают
@@ -214,15 +209,13 @@ class MagicBlockClient:
     async def private_transfer(self, recipient: str, amount: float, memo: str = "") -> dict:
         wallet = self.wallet_mgr.get_wallet_info()
         payload = {
-            "from":        wallet["public_key"],
-            "to":          recipient,
+            "owner":       wallet["public_key"],
+            "destination": recipient,
             "amount":      _to_base_units(amount),
             "mint":        self.mint,
             "cluster":     self.cluster,
             "validator":   self.validator,
-            "visibility":  "private",    # скрыть детали транзакции
-            "fromBalance": "ephemeral",  # списать с PER (ephemeral rollup)
-            "toBalance":   "ephemeral",  # зачислить получателю в PER
+            "privacy":     "private",
         }
         if memo:
             payload["memo"] = memo
@@ -243,7 +236,7 @@ class MagicBlockClient:
     async def deposit_to_per(self, amount: float) -> dict:
         wallet = self.wallet_mgr.get_wallet_info()
         payload = {
-            "from":               wallet["public_key"],
+            "owner":              wallet["public_key"],
             "amount":             _to_base_units(amount),
             "mint":               self.mint,
             "cluster":            self.cluster,

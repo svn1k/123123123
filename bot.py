@@ -3,6 +3,7 @@
 """
 
 import logging
+from html import escape as html_escape
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, MessageEntity,
     ReplyKeyboardMarkup, KeyboardButton
@@ -12,7 +13,6 @@ from telegram.ext import (
     CallbackQueryHandler, ContextTypes, filters
 )
 from telegram.constants import ParseMode
-
 from config import Config
 from agent import ConsumerAgent
 from storage import SpendingStorage
@@ -27,6 +27,21 @@ logger = logging.getLogger(__name__)
 config = Config()
 
 HISTORY_KEY = "chat_history"
+
+
+def html_code(text: str) -> str:
+    return f"<code>{html_escape(text)}</code>"
+
+
+async def safe_edit_message_text(message, text: str, **kwargs):
+    try:
+        return await message.edit_text(text, **kwargs)
+    except Exception as e:
+        logger.warning(f"Formatted message failed, retrying without parse mode: {e}")
+        fallback_kwargs = dict(kwargs)
+        fallback_kwargs.pop("parse_mode", None)
+        fallback_kwargs.pop("disable_web_page_preview", None)
+        return await message.edit_text(text, **fallback_kwargs)
 
 
 # ─── Keyboards ────────────────────────────────────────────────────────────────
@@ -140,34 +155,40 @@ async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         balances = await client.get_balance()
         pk = wallet_mgr.get_wallet_info()["public_key"]
         cluster = "devnet" if config.USE_DEVNET else "mainnet"
-        explorer_url = balances.get(
-            "explorer_url",
-            f"https://explorer.solana.com/address/{pk}?cluster={cluster}"
+        solana_display = f"{balances['solana_usdc']:.4f} USDC"
+        private_display = f"{'~' if balances.get('per_estimated') else ''}{balances['private_usdc']:.4f} USDC"
+        explorer_url = html_escape(
+            balances.get(
+                "explorer_url",
+                f"https://explorer.solana.com/address/{pk}?cluster={cluster}"
+            ),
+            quote=True,
         )
-        demo_note = "\n\n⚠️ _Demo mode — API unavailable_" if balances.get("demo_mode") else ""
+        demo_note = "\n\n⚠️ <i>Demo mode: API unavailable</i>" if balances.get("demo_mode") else ""
 
         faucet_note = ""
         if balances["solana_usdc"] == 0.0 and balances["private_usdc"] == 0.0 and config.USE_DEVNET:
             faucet_note = (
-                "\n\n💡 *Balance is 0?* Get free devnet USDC:\n"
-                "[spl\\-token\\-faucet\\.com](https://spl-token-faucet.com/?token-name=USDC)\n"
-                f"_Your address:_ `{pk}`"
+                "\n\n💡 <b>Balance is 0?</b> Get free devnet USDC:\n"
+                '<a href="https://spl-token-faucet.com/?token-name=USDC">spl-token-faucet.com</a>\n'
+                f"Your address:\n{html_code(pk)}"
             )
 
-        per_prefix = "\\~" if balances.get("per_estimated") else ""
-        per_note = " _(estimated)_" if balances.get("per_estimated") else ""
-        await msg.edit_text(
-            f"💰 *Your Balance*\n\n"
-            f"🌐 Solana \\(public\\): `{balances['solana_usdc']:.4f} USDC`\n"
-            f"🔒 Private PER: `{per_prefix}{balances['private_usdc']:.4f} USDC`{per_note}\\n\\n"
-            f"📍 Wallet:\n`{pk}`\n\n"
-            f"🔍 [View on Solana Explorer]({explorer_url})"
-            + demo_note + faucet_note,
-            parse_mode=ParseMode.MARKDOWN_V2,
+        per_note = " <i>(estimated)</i>" if balances.get("per_estimated") else ""
+        await safe_edit_message_text(
+            msg,
+            f"💰 <b>Your Balance</b>\n\n"
+            f"🌐 Solana (public): {html_code(solana_display)}\n"
+            f"🔒 Private PER: {html_code(private_display)}{per_note}\n\n"
+            f"📍 Wallet:\n{html_code(pk)}\n\n"
+            f'🔍 <a href="{explorer_url}">View on Solana Explorer</a>'
+            + demo_note
+            + faucet_note,
+            parse_mode=ParseMode.HTML,
             disable_web_page_preview=True
         )
     except Exception as e:
-        await msg.edit_text(f"⚠️ Error fetching balance: {str(e)}")
+        await safe_edit_message_text(msg, f"⚠️ Error fetching balance: {str(e)}")
 
 
 async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -293,7 +314,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if result.get("awaiting_confirmation") and result.get("pending_tx"):
             context.user_data["pending_tx"] = result["pending_tx"]
 
-        await thinking_msg.edit_text(
+        await safe_edit_message_text(
+            thinking_msg,
             result["message"],
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=result.get("keyboard")
@@ -301,7 +323,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logger.error(f"Agent error: {e}", exc_info=True)
-        await thinking_msg.edit_text(f"⚠️ Agent error: {str(e)}\n\nTry rephrasing your request.")
+        await safe_edit_message_text(thinking_msg, f"⚠️ Agent error: {str(e)}\n\nTry rephrasing your request.")
 
 
 # ─── Callback Handler ─────────────────────────────────────────────────────────
@@ -351,7 +373,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             set_history(context, result.get("history", []))
             context.user_data.pop("pending_tx", None)
 
-            await query.edit_message_text(
+            await safe_edit_message_text(
+                query.message,
                 result["message"],
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=result.get("keyboard")
@@ -359,9 +382,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         except Exception as e:
             logger.error(f"Payment failed: {e}", exc_info=True)
-            await query.edit_message_text(
-                f"❌ *Payment Failed*\n\n`{str(e)}`",
-                parse_mode=ParseMode.MARKDOWN
+            await safe_edit_message_text(
+                query.message,
+                f"❌ Payment Failed\n\n{str(e)}"
             )
         return
 
