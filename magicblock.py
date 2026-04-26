@@ -39,11 +39,12 @@ def _from_base_units(amount_raw, decimals: int = USDC_DECIMALS) -> float:
 
 
 class MagicBlockClient:
-    def __init__(self, wallet_mgr, config):
+    def __init__(self, wallet_mgr, config, use_devnet=None):
         self.wallet_mgr = wallet_mgr
         self.config = config
+        self.use_devnet = config.USE_DEVNET if use_devnet is None else use_devnet
 
-        if config.USE_DEVNET:
+        if self.use_devnet:
             self.cluster          = "devnet"
             self.mint             = USDC_DEVNET
             self.validator        = config.MAGICBLOCK_VALIDATOR or None
@@ -105,8 +106,7 @@ class MagicBlockClient:
             values = data.get("result", {}).get("value", [])
             return values[0] if values else None
 
-    def _confirm_signature(self, signature: str, timeout_seconds: int = 45):
-        rpc_candidates = [self.router_url, self.rpc_url]
+    def _confirm_signature(self, signature: str, rpc_candidates: list[str], timeout_seconds: int = 60):
         deadline = time.time() + timeout_seconds
         saw_pending = False
 
@@ -130,9 +130,10 @@ class MagicBlockClient:
 
             time.sleep(2)
 
+        network_name = self.cluster
         if saw_pending:
             raise ValueError(f"Transaction {signature} was submitted but not confirmed within {timeout_seconds}s.")
-        raise ValueError(f"Transaction {signature} was submitted but not found on devnet within {timeout_seconds}s.")
+        raise ValueError(f"Transaction {signature} was submitted but not found on {network_name} within {timeout_seconds}s.")
 
     def _sign_and_send_tx(self, tx_base64: str, send_to: str = "base") -> str:
         """
@@ -161,15 +162,20 @@ class MagicBlockClient:
             signed_bytes = bytes(tx)
 
         signed_b64 = base64.b64encode(signed_bytes).decode()
-        rpc_candidates = [self.router_url]
-        rpc_candidates.append(self.rpc_url)
+        if send_to == "ephemeral":
+            submit_candidates = [self.router_url]
+            confirm_candidates = [self.router_url, self.rpc_url]
+        else:
+            submit_candidates = [self.rpc_url, self.router_url]
+            confirm_candidates = [self.rpc_url, self.router_url]
 
         last_error = None
-        for rpc_url in rpc_candidates:
+        for rpc_url in submit_candidates:
             try:
                 logger.info(f"Sending tx to {rpc_url} (sendTo={send_to})")
                 signature = self._send_raw_transaction(rpc_url, signed_b64)
-                self._confirm_signature(signature)
+                logger.info(f"Submitted tx signature: {signature}")
+                self._confirm_signature(signature, confirm_candidates)
                 return signature
             except Exception as e:
                 last_error = e

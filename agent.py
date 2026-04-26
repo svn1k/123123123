@@ -157,11 +157,12 @@ Respond in English. Use emojis. Markdown: *bold*, _italic_."""
 
 
 class ConsumerAgent:
-    def __init__(self, user_id: str, wallet_mgr: WalletManager, storage: SpendingStorage):
+    def __init__(self, user_id: str, wallet_mgr: WalletManager, storage: SpendingStorage, use_devnet: bool | None = None):
         self.user_id = user_id
         self.wallet_mgr = wallet_mgr
         self.storage = storage
-        self.mb_client = MagicBlockClient(wallet_mgr, config)
+        self.mb_client = MagicBlockClient(wallet_mgr, config, use_devnet=use_devnet)
+        self.network_label = "Solana Devnet" if self.mb_client.use_devnet else "Solana Mainnet"
 
     def _normalize_solana_address(self, value: str, field_name: str = "recipient") -> str:
         address = "".join(str(value or "").split())
@@ -249,6 +250,7 @@ class ConsumerAgent:
                     return {
                         "message": (
                             "⚠️ *Confirm Payment*\n\n"
+                            f"🌐 Network: *{escape_markdown(self.network_label, version=2)}*\n\n"
                             f"🎯 *{action}*\n\n"
                             f"{details}\n\n"
                             f"💵 Amount: *{float(fn_args.get('amount', 0)):.2f} USDC*\n\n"
@@ -360,7 +362,13 @@ class ConsumerAgent:
                     tx_id=result.get("tx_id", ""),
                     metadata={"recipient": recipient}
                 )
-                return {"success": True, "tx_id": result.get("tx_id"), "amount": amount, "note": "Funds sent to recipient PER balance. Recipient checks balance via bot or withdraws from PER."}
+                return {
+                    "success": True,
+                    "tx_id": result.get("tx_id"),
+                    "amount": amount,
+                    "network": self.network_label,
+                    "note": "Funds sent to recipient PER balance. Recipient checks balance via bot or withdraws from PER."
+                }
 
             elif tool_name == "book_service":
                 merchant = self._normalize_solana_address(
@@ -380,7 +388,7 @@ class ConsumerAgent:
                     tx_id=result.get("tx_id", ""),
                     metadata={"service_type": args["service_type"]}
                 )
-                return {"success": True, "booking_id": result.get("tx_id", "BK-DEMO"), "amount": amount}
+                return {"success": True, "booking_id": result.get("tx_id", "BK-DEMO"), "amount": amount, "network": self.network_label}
 
             elif tool_name == "buy_product":
                 merchant = self._normalize_solana_address(
@@ -400,7 +408,7 @@ class ConsumerAgent:
                     tx_id=result.get("tx_id", ""),
                     metadata={"store": args.get("store", "unknown")}
                 )
-                return {"success": True, "order_id": result.get("tx_id", "ORD-DEMO"), "product": args["product_name"]}
+                return {"success": True, "order_id": result.get("tx_id", "ORD-DEMO"), "product": args["product_name"], "network": self.network_label}
 
             elif tool_name == "get_spending_history":
                 records = self.storage.get_history(
@@ -418,6 +426,7 @@ class ConsumerAgent:
                     amount=amount,
                     tx_id=result.get("tx_id", ""),
                 )
+                result["network"] = self.network_label
                 return result
 
             elif tool_name == "withdraw_from_per":
@@ -429,6 +438,7 @@ class ConsumerAgent:
                     amount=amount,
                     tx_id=result.get("tx_id", ""),
                 )
+                result["network"] = self.network_label
                 return result
 
             else:

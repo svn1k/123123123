@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 config = Config()
 
 HISTORY_KEY = "chat_history"
+NETWORK_KEY = "use_devnet"
 
 
 def html_code(text: str) -> str:
@@ -42,6 +43,16 @@ async def safe_edit_message_text(message, text: str, **kwargs):
         fallback_kwargs.pop("parse_mode", None)
         fallback_kwargs.pop("disable_web_page_preview", None)
         return await message.edit_text(text, **fallback_kwargs)
+
+
+def network_name(use_devnet: bool) -> str:
+    return "Solana Devnet" if use_devnet else "Solana Mainnet"
+
+
+def decorate_with_network(message: str, use_devnet: bool) -> str:
+    if not message:
+        return message
+    return f"🌐 *Network:* {network_name(use_devnet)}\n\n{message}"
 
 
 # ─── Keyboards ────────────────────────────────────────────────────────────────
@@ -82,11 +93,20 @@ def clear_history(context: ContextTypes.DEFAULT_TYPE):
     context.user_data[HISTORY_KEY] = []
 
 
+def get_use_devnet(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    return context.user_data.get(NETWORK_KEY, config.USE_DEVNET)
+
+
+def set_use_devnet(context: ContextTypes.DEFAULT_TYPE, value: bool):
+    context.user_data[NETWORK_KEY] = value
+
+
 # ─── Commands ─────────────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = str(user.id)
+    set_use_devnet(context, get_use_devnet(context))
     wallet_mgr = WalletManager(user_id)
 
     if not wallet_mgr.has_wallet():
@@ -143,18 +163,19 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     wallet_mgr = WalletManager(user_id)
+    use_devnet = get_use_devnet(context)
 
     if not wallet_mgr.has_wallet():
         await update.message.reply_text("❌ Wallet not found. Use /start")
         return
 
     msg = await update.message.reply_text("⏳ Fetching balance...")
-    client = MagicBlockClient(wallet_mgr, config)
+    client = MagicBlockClient(wallet_mgr, config, use_devnet=use_devnet)
 
     try:
         balances = await client.get_balance()
         pk = wallet_mgr.get_wallet_info()["public_key"]
-        cluster = "devnet" if config.USE_DEVNET else "mainnet"
+        cluster = "devnet" if use_devnet else "mainnet"
         solana_display = f"{balances['solana_usdc']:.4f} USDC"
         private_source = balances.get("private_balance_source", "unavailable")
         if private_source == "api":
@@ -179,7 +200,7 @@ async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             private_auth_note = "\n\nℹ️ <i>Private PER balance is shown from local history because MagicBlock private-balance on devnet requires an authorization token.</i>"
 
         faucet_note = ""
-        if balances["solana_usdc"] == 0.0 and balances["private_usdc"] == 0.0 and config.USE_DEVNET:
+        if balances["solana_usdc"] == 0.0 and balances["private_usdc"] == 0.0 and use_devnet:
             faucet_note = (
                 "\n\n💡 <b>Balance is 0?</b> Get free devnet USDC:\n"
                 '<a href="https://spl-token-faucet.com/?token-name=USDC">spl-token-faucet.com</a>\n'
@@ -244,6 +265,7 @@ async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def wallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     wallet_mgr = WalletManager(user_id)
+    use_devnet = get_use_devnet(context)
 
     if not wallet_mgr.has_wallet():
         await update.message.reply_text("❌ Wallet not found. Use /start")
@@ -253,11 +275,12 @@ async def wallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📋 Copy address", callback_data="copy_address")],
         [InlineKeyboardButton("💾 Export private key", callback_data="export_key")],
+        [InlineKeyboardButton("🌐 Switch to Mainnet" if use_devnet else "🧪 Switch to Devnet", callback_data="toggle_network")],
     ])
     await update.message.reply_text(
         f"⚙️ *Wallet Management*\n\n"
         f"📍 Address:\n`{info['public_key']}`\n\n"
-        f"🌐 Network: {'Solana Devnet' if config.USE_DEVNET else 'Solana Mainnet'}\n\n"
+        f"🌐 Network: {network_name(use_devnet)}\n\n"
         f"_Private key is encrypted and stored securely_",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=keyboard
@@ -276,8 +299,10 @@ async def clear_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def agent_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     history = get_history(context)
     status = f"📝 {len(history)} messages in context" if history else "🆕 Fresh context"
+    use_devnet = get_use_devnet(context)
     await update.message.reply_text(
         f"🤖 *Agent ready* — {status}\n\n"
+        f"🌐 Network: *{network_name(use_devnet)}*\n\n"
         "Tell me what to do:\n"
         "• `Book a hotel in Paris for 2 nights`\n"
         "• `Send 20 USDC to Alex`\n"
@@ -313,10 +338,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     thinking_msg = await update.message.reply_text("🤔 Thinking...")
+    use_devnet = get_use_devnet(context)
 
     try:
         storage = SpendingStorage(user_id)
-        agent = ConsumerAgent(user_id=user_id, wallet_mgr=wallet_mgr, storage=storage)
+        agent = ConsumerAgent(user_id=user_id, wallet_mgr=wallet_mgr, storage=storage, use_devnet=use_devnet)
         history = get_history(context)
         result = await agent.process(text, history)
 
@@ -324,11 +350,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Сохраняем pending_tx если агент запросил подтверждение
         if result.get("awaiting_confirmation") and result.get("pending_tx"):
+            result["pending_tx"]["use_devnet"] = use_devnet
             context.user_data["pending_tx"] = result["pending_tx"]
 
         await safe_edit_message_text(
             thinking_msg,
-            result["message"],
+            decorate_with_network(result["message"], use_devnet),
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=result.get("keyboard")
         )
@@ -373,7 +400,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             wallet_mgr = WalletManager(user_id)
             storage = SpendingStorage(user_id)
-            agent = ConsumerAgent(user_id=user_id, wallet_mgr=wallet_mgr, storage=storage)
+            use_devnet = pending.get("use_devnet", get_use_devnet(context))
+            agent = ConsumerAgent(user_id=user_id, wallet_mgr=wallet_mgr, storage=storage, use_devnet=use_devnet)
 
             result = await agent.resume_after_confirmation(
                 tool_call_id=pending["tool_call_id"],
@@ -387,7 +415,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await safe_edit_message_text(
                 query.message,
-                result["message"],
+                decorate_with_network(result["message"], use_devnet),
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=result.get("keyboard")
             )
@@ -396,8 +424,28 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Payment failed: {e}", exc_info=True)
             await safe_edit_message_text(
                 query.message,
-                f"❌ Payment Failed\n\n{str(e)}"
+                decorate_with_network(f"❌ Payment Failed\n\n{str(e)}", use_devnet)
             )
+        return
+
+    if data == "toggle_network":
+        use_devnet = not get_use_devnet(context)
+        set_use_devnet(context, use_devnet)
+        wallet_mgr = WalletManager(user_id)
+        info = wallet_mgr.get_wallet_info()
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📋 Copy address", callback_data="copy_address")],
+            [InlineKeyboardButton("💾 Export private key", callback_data="export_key")],
+            [InlineKeyboardButton("🌐 Switch to Mainnet" if use_devnet else "🧪 Switch to Devnet", callback_data="toggle_network")],
+        ])
+        await query.edit_message_text(
+            f"⚙️ *Wallet Management*\n\n"
+            f"📍 Address:\n`{info['public_key']}`\n\n"
+            f"🌐 Network: {network_name(use_devnet)}\n\n"
+            f"_Private key is encrypted and stored securely_",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=keyboard
+        )
         return
 
     # ── Stats ─────────────────────────────────────────────────────────────────
