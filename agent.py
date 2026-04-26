@@ -165,8 +165,6 @@ class ConsumerAgent:
         headers = {
             "Authorization": f"Bearer {config.GITHUB_TOKEN}",
             "Content-Type": "application/json",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2026-03-10"
         }
         payload = {
             "model": config.GITHUB_MODEL,
