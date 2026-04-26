@@ -103,6 +103,7 @@ class MagicBlockClient:
                 raise ValueError("MagicBlock auth challenge is empty.")
 
             signature_b58 = self.wallet_mgr.sign_message(challenge)
+            logger.info(f"MagicBlock auth challenge received for {pubkey[:8]}...")
             auth_resp = http.post(
                 f"{TEE_RPC_MAINNET}/auth/login",
                 json={
@@ -111,7 +112,6 @@ class MagicBlockClient:
                     "signature": signature_b58,
                 },
             )
-            auth_resp.raise_for_status()
             auth_json = auth_resp.json()
             if auth_resp.status_code != 200:
                 raise ValueError(f"MagicBlock auth failed: {auth_json.get('error', auth_json)}")
@@ -258,6 +258,7 @@ class MagicBlockClient:
         api_per_ok   = False
         demo_mode    = False
         has_local_per_activity = False
+        auth_error = ""
 
         async with httpx.AsyncClient(timeout=15) as http:
             # 1. Публичный баланс через RPC (самый надёжный для devnet)
@@ -302,7 +303,10 @@ class MagicBlockClient:
                     else:
                         logger.warning(f"Private-balance non-2xx: {r.status_code} {r.text[:200]}")
                 except Exception as e:
+                    auth_error = str(e)
                     logger.warning(f"Private-balance error: {e}")
+            elif not self.use_devnet:
+                auth_error = "MagicBlock authorization token is unavailable."
 
         # 3. Если API вернул 0 для PER — считаем локально из истории storage
         #    deposit увеличивает PER, withdraw/send уменьшают
@@ -341,6 +345,7 @@ class MagicBlockClient:
                 "unavailable"
             ),
             "needs_private_auth": (not self.use_devnet) and (not bool(self.authorization_token)),
+            "auth_error": auth_error,
             "explorer_url": f"{explorer_base}/{wallet['public_key']}{cluster_param}",
         }
 
