@@ -15,6 +15,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, List
 import logging
+import httpx
+
+from wallet import UPSTASH_URL, UPSTASH_TOKEN, _get_cipher
 
 logger = logging.getLogger(__name__)
 
@@ -196,7 +199,9 @@ class UserProfileStorage:
     def __init__(self, user_id: str):
         self.user_id = user_id
         self.file = STORAGE_DIR / f"{user_id}_profile.json"
+        self.db_key = f"profile_{user_id}"
         self._cache: Optional[dict] = None
+        self.cipher = _get_cipher()
 
     def _default_profile(self) -> dict:
         return {
@@ -217,19 +222,19 @@ class UserProfileStorage:
     def _load(self) -> dict:
         if self._cache is not None:
             return self._cache
+        profile_from_db = self._load_from_db()
+        if profile_from_db is not None:
+            self._cache = self._normalize_profile(profile_from_db)
+            self._save_local_only(self._cache)
+            return self._cache
         if not self.file.exists():
             self._cache = self._default_profile()
             return self._cache
         try:
             data = json.loads(self.file.read_text(encoding="utf-8"))
-            profile = self._default_profile()
-            if isinstance(data, dict):
-                profile.update(data)
-                profile["risk_rules"] = {
-                    **self._default_profile()["risk_rules"],
-                    **(data.get("risk_rules") or {}),
-                }
+            profile = self._normalize_profile(data)
             self._cache = profile
+            self._save_to_db(profile)
             return profile
         except Exception as e:
             logger.error(f"Failed to load profile: {e}")
@@ -237,11 +242,60 @@ class UserProfileStorage:
             return self._cache
 
     def _save(self, profile: dict):
+        self._save_local_only(profile)
+        self._save_to_db(profile)
+        self._cache = profile
+
+    def _normalize_profile(self, data: dict | None) -> dict:
+        profile = self._default_profile()
+        if isinstance(data, dict):
+            profile.update(data)
+            profile["risk_rules"] = {
+                **self._default_profile()["risk_rules"],
+                **(data.get("risk_rules") or {}),
+            }
+        return profile
+
+    def _save_local_only(self, profile: dict):
         self.file.write_text(
             json.dumps(profile, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        self._cache = profile
+
+    def _headers(self):
+        return {"Authorization": f"Bearer {UPSTASH_TOKEN}"}
+
+    def _load_from_db(self) -> Optional[dict]:
+        if not UPSTASH_URL:
+            return None
+        try:
+            with httpx.Client(timeout=10) as client:
+                resp = client.get(f"{UPSTASH_URL}/get/{self.db_key}", headers=self._headers())
+                if resp.status_code != 200:
+                    return None
+                result = resp.json().get("result")
+                if not result:
+                    return None
+                decrypted = self.cipher.decrypt(result.encode()).decode("utf-8")
+                return json.loads(decrypted)
+        except Exception as e:
+            logger.error(f"Failed to load profile from Upstash: {e}")
+            return None
+
+    def _save_to_db(self, profile: dict):
+        if not UPSTASH_URL:
+            return
+        try:
+            encrypted = self.cipher.encrypt(json.dumps(profile).encode()).decode("utf-8")
+            with httpx.Client(timeout=10) as client:
+                resp = client.post(
+                    f"{UPSTASH_URL}/set/{self.db_key}",
+                    headers=self._headers(),
+                    json=encrypted,
+                )
+                resp.raise_for_status()
+        except Exception as e:
+            logger.error(f"Failed to save profile to Upstash: {e}")
 
     def _next_id(self, prefix: str) -> str:
         return f"{prefix}-{secrets.token_hex(4).upper()}"

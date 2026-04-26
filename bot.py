@@ -499,7 +499,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         save_contact_match = re.search(
-            r"^\s*save\s+(@?[A-Za-z0-9_]+)\s+as\s+([1-9A-HJ-NP-Za-km-z]{32,44})\s*$",
+            r"^\s*save\s+(@?[A-Za-z0-9_]+)\s+as(?:\s+alias)?\s+([1-9A-HJ-NP-Za-km-z]{32,44})\s*$",
             text,
             re.IGNORECASE,
         )

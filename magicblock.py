@@ -26,7 +26,6 @@ EPHEMERAL_RPC_DEVNET  = "https://devnet.magicblock.app"
 EPHEMERAL_RPC_MAINNET = "https://mainnet.magicblock.app"
 TEE_RPC_DEVNET = "https://devnet-tee.magicblock.app"
 TEE_RPC_MAINNET = "https://mainnet-tee.magicblock.app"
-TEE_VALIDATOR = "MTEWGuqxUpYZGFJQcp8tLN7x5v9BSeoFHYWQQ3n3xzo"
 
 USDC_DECIMALS = 6
 
@@ -51,7 +50,7 @@ class MagicBlockClient:
         if self.use_devnet:
             self.cluster          = "devnet"
             self.mint             = USDC_DEVNET
-            self.validator        = config.MAGICBLOCK_VALIDATOR or TEE_VALIDATOR
+            self.validator        = config.MAGICBLOCK_VALIDATOR or None
             self.rpc_url          = RPC_DEVNET
             self.router_url       = ROUTER_DEVNET
             self.ephemeral_rpc_url = EPHEMERAL_RPC_DEVNET
@@ -59,7 +58,7 @@ class MagicBlockClient:
         else:
             self.cluster          = "mainnet"
             self.mint             = USDC_MAINNET
-            self.validator        = config.MAGICBLOCK_VALIDATOR or TEE_VALIDATOR
+            self.validator        = config.MAGICBLOCK_VALIDATOR or None
             self.rpc_url          = RPC_MAINNET
             self.router_url       = ROUTER_MAINNET
             self.ephemeral_rpc_url = EPHEMERAL_RPC_MAINNET
@@ -156,15 +155,15 @@ class MagicBlockClient:
         if send_to == "ephemeral":
             private_tee_rpc = self._get_private_tee_rpc_url()
             submit_candidates = self._dedupe_urls([
+                self.ephemeral_rpc_url,
                 self.router_url,
                 private_tee_rpc,
-                self.ephemeral_rpc_url,
             ])
             confirm_candidates = self._dedupe_urls([
-                self.router_url,
-                private_tee_rpc,
                 self.ephemeral_rpc_url,
+                self.router_url,
                 self.rpc_url,
+                private_tee_rpc,
             ])
         else:
             submit_candidates = self._dedupe_urls([self.rpc_url, self.router_url])
@@ -176,22 +175,30 @@ class MagicBlockClient:
             return self._dedupe_urls([submit_url, self.rpc_url, self.router_url])
 
         private_tee_rpc = self._get_private_tee_rpc_url()
-        if submit_url == self.router_url:
+        if submit_url == self.ephemeral_rpc_url:
             return self._dedupe_urls([
+                self.ephemeral_rpc_url,
                 self.router_url,
                 self.rpc_url,
                 private_tee_rpc,
+            ])
+        if submit_url == self.router_url:
+            return self._dedupe_urls([
+                self.router_url,
                 self.ephemeral_rpc_url,
+                self.rpc_url,
+                private_tee_rpc,
             ])
         if submit_url == private_tee_rpc:
             return self._dedupe_urls([
                 private_tee_rpc,
+                self.ephemeral_rpc_url,
                 self.router_url,
                 self.rpc_url,
-                self.ephemeral_rpc_url,
             ])
         return self._dedupe_urls([
             submit_url,
+            self.ephemeral_rpc_url,
             self.router_url,
             self.rpc_url,
             private_tee_rpc,
@@ -367,6 +374,8 @@ class MagicBlockClient:
             except Exception as e:
                 last_error = e
                 logger.warning(f"sendTransaction via {rpc_url} failed: {e}")
+                if "submitted but" in str(e).lower():
+                    break
 
         raise ValueError(f"Unable to submit transaction: {last_error}")
 
@@ -516,6 +525,9 @@ class MagicBlockClient:
             "visibility":  "private",
             "fromBalance": "ephemeral",
             "toBalance":   "ephemeral",
+            "initIfMissing": True,
+            "initAtasIfMissing": True,
+            "initVaultIfMissing": True,
         }
         if self.validator:
             payload["validator"] = self.validator
@@ -544,6 +556,7 @@ class MagicBlockClient:
             "mint":               self.mint,
             "cluster":            self.cluster,
             "initIfMissing":      True,
+            "initAtasIfMissing":  True,
             "initVaultIfMissing": True,
         }
         if self.validator:
