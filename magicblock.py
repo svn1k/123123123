@@ -396,11 +396,13 @@ class MagicBlockClient:
         submit_candidates, default_confirm_candidates = self._get_rpc_candidates(send_to, validator=validator)
 
         last_error = None
+        last_signature = None
         selected_validator = validator or self.validator
         for rpc_url in submit_candidates:
             try:
                 logger.info(f"Sending tx to {rpc_url} (sendTo={send_to}, validator={selected_validator})")
                 signature = self._send_raw_transaction(rpc_url, signed_b64)
+                last_signature = signature
                 logger.info(f"Submitted tx signature: {signature}")
                 confirm_candidates = self._get_confirm_candidates_for_submit(send_to, rpc_url, validator=validator) or default_confirm_candidates
                 self._confirm_signature(signature, confirm_candidates)
@@ -408,7 +410,18 @@ class MagicBlockClient:
             except Exception as e:
                 last_error = e
                 logger.warning(f"sendTransaction via {rpc_url} failed: {e}")
-                if "submitted but" in str(e).lower():
+                err_lower = str(e).lower()
+                if "transaction failed on-chain" in err_lower:
+                    break
+                if ("already been processed" in err_lower or "already processed" in err_lower) and last_signature:
+                    try:
+                        confirm_candidates = self._get_confirm_candidates_for_submit(send_to, rpc_url, validator=validator) or default_confirm_candidates
+                        self._confirm_signature(last_signature, confirm_candidates)
+                        return last_signature
+                    except Exception as confirm_error:
+                        last_error = confirm_error
+                    break
+                if "submitted but" in err_lower:
                     break
 
         raise ValueError(f"Unable to submit transaction: {last_error}")
@@ -547,7 +560,14 @@ class MagicBlockClient:
             "explorer_url": f"{explorer_base}/{wallet['public_key']}{cluster_param}",
         }
 
-    async def _build_private_transfer(self, recipient: str, amount: float, memo: str = "", to_balance: str = "ephemeral") -> dict:
+    async def _build_private_transfer(
+        self,
+        recipient: str,
+        amount: float,
+        memo: str = "",
+        from_balance: str = "base",
+        to_balance: str = "ephemeral",
+    ) -> dict:
         wallet = self.wallet_mgr.get_wallet_info()
         payload = {
             "from":        wallet["public_key"],
@@ -556,7 +576,7 @@ class MagicBlockClient:
             "mint":        self.mint,
             "cluster":     self.cluster,
             "visibility":  "private",
-            "fromBalance": "ephemeral",
+            "fromBalance": from_balance,
             "toBalance":   to_balance,
             "initIfMissing": True,
             "initAtasIfMissing": True,
@@ -571,50 +591,39 @@ class MagicBlockClient:
             r = await http.post(f"{PAYMENTS_API}/transfer", json=payload)
             logger.info(f"Transfer API: status={r.status_code} body={r.text[:500]}")
             if r.status_code == 402:
-                raise ValueError("Insufficient private balance.")
+                raise ValueError(f"Insufficient {from_balance} balance.")
             if not r.is_success:
                 raise ValueError(f"Transfer failed {r.status_code}: {r.text[:300]}")
             return r.json()
 
-    async def private_transfer(self, recipient: str, amount: float, memo: str = "") -> dict:
+    async def private_transfer(
+        self,
+        recipient: str,
+        amount: float,
+        memo: str = "",
+        from_balance: str = "base",
+        to_balance: str = "ephemeral",
+    ) -> dict:
         await self._initialize_mint_if_needed()
 
-        tx_data = await self._build_private_transfer(recipient=recipient, amount=amount, memo=memo, to_balance="ephemeral")
+        tx_data = await self._build_private_transfer(
+            recipient=recipient,
+            amount=amount,
+            memo=memo,
+            from_balance=from_balance,
+            to_balance=to_balance,
+        )
         send_to = tx_data.get("sendTo", "base")
         tx_validator = tx_data.get("validator") or self.validator
         logger.info(
-            f"Private transfer prepared for validator={tx_validator} endpoint={self._get_ephemeral_rpc_for_validator(tx_validator)}"
+            f"Private transfer prepared for validator={tx_validator} endpoint={self._get_ephemeral_rpc_for_validator(tx_validator)} "
+            f"(fromBalance={from_balance}, toBalance={to_balance})"
         )
-        try:
-            sig = self._sign_and_send_tx(
-                tx_data["transactionBase64"],
-                send_to=send_to,
-                validator=tx_validator,
-            )
-        except ValueError as e:
-            if "InvalidWritableAccount" not in str(e):
-                raise
-
-            logger.warning(
-                "Private transfer ephemeral->ephemeral failed with InvalidWritableAccount; "
-                "retrying as private ephemeral->base"
-            )
-            tx_data = await self._build_private_transfer(
-                recipient=recipient,
-                amount=amount,
-                memo=memo,
-                to_balance="base",
-            )
-            send_to = tx_data.get("sendTo", "base")
-            tx_validator = tx_data.get("validator") or self.validator
-            logger.info(
-                f"Private transfer fallback prepared for validator={tx_validator} endpoint={self._get_ephemeral_rpc_for_validator(tx_validator)}"
-            )
-            sig = self._sign_and_send_tx(
-                tx_data["transactionBase64"],
-                send_to=send_to,
-                validator=tx_validator,
-            )
+        sig = self._sign_and_send_tx(
+            tx_data["transactionBase64"],
+            send_to=send_to,
+            validator=tx_validator,
+        )
 
         return {"success": True, "tx_id": sig, "amount": amount}
 

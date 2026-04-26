@@ -303,7 +303,16 @@ class UserProfileStorage:
     def get_contacts(self) -> List[dict]:
         return list(self._load().get("contacts", []))
 
-    def save_contact(self, alias: str, address: str, note: str = "") -> dict:
+    def save_contact(
+        self,
+        alias: str,
+        address: str,
+        note: str = "",
+        wallet_user_id: str = "",
+        wallet_username: str = "",
+        wallet_display_name: str = "",
+        is_internal_wallet: bool = False,
+    ) -> dict:
         alias_key = normalize_alias(alias)
         if not alias_key:
             raise ValueError("Contact alias cannot be empty.")
@@ -315,6 +324,10 @@ class UserProfileStorage:
             "alias_key": alias_key,
             "address": address.strip(),
             "note": note.strip(),
+            "wallet_user_id": str(wallet_user_id or "").strip(),
+            "wallet_username": str(wallet_username or "").strip(),
+            "wallet_display_name": str(wallet_display_name or "").strip(),
+            "is_internal_wallet": bool(is_internal_wallet),
             "updated_at": iso_now(),
         }
         if existing:
@@ -353,7 +366,11 @@ class UserProfileStorage:
         address: str,
         category: str = "general",
         note: str = "",
-        default_amount: float = 0.0
+        default_amount: float = 0.0,
+        wallet_user_id: str = "",
+        wallet_username: str = "",
+        wallet_display_name: str = "",
+        is_internal_wallet: bool = False,
     ) -> dict:
         alias_key = normalize_alias(alias)
         if not alias_key:
@@ -368,6 +385,10 @@ class UserProfileStorage:
             "category": (category or "general").strip().lower(),
             "note": note.strip(),
             "default_amount": float(default_amount or 0.0),
+            "wallet_user_id": str(wallet_user_id or "").strip(),
+            "wallet_username": str(wallet_username or "").strip(),
+            "wallet_display_name": str(wallet_display_name or "").strip(),
+            "is_internal_wallet": bool(is_internal_wallet),
             "updated_at": iso_now(),
         }
         if existing:

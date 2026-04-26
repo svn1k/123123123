@@ -17,6 +17,11 @@ logger = logging.getLogger(__name__)
 # ── Base58 ────────────────────────────────────────────────────────────────────
 _B58 = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
+
+def _normalize_alias_key(value: str) -> str:
+    cleaned = "".join(str(value or "").strip().split()).lower()
+    return cleaned[1:] if cleaned.startswith("@") else cleaned
+
 def _b58encode(data: bytes) -> str:
     lead = len(data) - len(data.lstrip(b"\x00"))
     num = int.from_bytes(data, "big")
@@ -65,42 +70,120 @@ class WalletManager:
     def _headers(self):
         return {"Authorization": f"Bearer {UPSTASH_TOKEN}"}
 
-    def _save_to_db(self, data: dict):
+    def _save_encrypted_json(self, key: str, data: dict):
         if not UPSTASH_URL:
             logger.error("UPSTASH_URL is missing!")
             return
-        
-        # Шифруем данные кошелька перед отправкой в базу
+
         encrypted_data = self.cipher.encrypt(json.dumps(data).encode()).decode('utf-8')
-        
+
         try:
             with httpx.Client(timeout=10) as client:
                 resp = client.post(
-                    f"{UPSTASH_URL}/set/{self.db_key}", 
-                    headers=self._headers(), 
+                    f"{UPSTASH_URL}/set/{key}",
+                    headers=self._headers(),
                     json=encrypted_data
                 )
                 resp.raise_for_status()
         except Exception as e:
-            logger.error(f"Failed to save wallet to Upstash: {e}")
+            logger.error(f"Failed to save encrypted key {key} to Upstash: {e}")
 
-    def _load_from_db(self) -> dict:
+    def _load_encrypted_json(self, key: str) -> dict | None:
         if not UPSTASH_URL:
             return None
-            
+
         try:
             with httpx.Client(timeout=10) as client:
-                resp = client.get(f"{UPSTASH_URL}/get/{self.db_key}", headers=self._headers())
+                resp = client.get(f"{UPSTASH_URL}/get/{key}", headers=self._headers())
                 if resp.status_code == 200:
                     result = resp.json().get("result")
                     if result:
-                        # Расшифровываем данные обратно
                         decrypted_data = self.cipher.decrypt(result.encode()).decode('utf-8')
                         return json.loads(decrypted_data)
         except Exception as e:
-            logger.error(f"Failed to load wallet from Upstash: {e}")
-            
+            logger.error(f"Failed to load encrypted key {key} from Upstash: {e}")
+
         return None
+
+    def _save_to_db(self, data: dict):
+        self._save_encrypted_json(self.db_key, data)
+
+    def _load_from_db(self) -> dict | None:
+        return self._load_encrypted_json(self.db_key)
+
+    def _build_directory_record(self, wallet: dict, username: str = "", first_name: str = "", last_name: str = "") -> dict:
+        username_key = _normalize_alias_key(username)
+        display_name = " ".join(part for part in [str(first_name or "").strip(), str(last_name or "").strip()] if part).strip()
+        owner = wallet.get("owner") or {}
+        return {
+            "user_id": str(self.user_id),
+            "public_key": wallet.get("public_key", ""),
+            "username": username_key or owner.get("username", ""),
+            "display_name": display_name or owner.get("display_name", ""),
+        }
+
+    def sync_directory(self, username: str = "", first_name: str = "", last_name: str = "") -> dict | None:
+        if not self.has_wallet():
+            return None
+
+        wallet = self.get_wallet_info()
+        record = self._build_directory_record(wallet, username=username, first_name=first_name, last_name=last_name)
+        wallet["owner"] = {
+            "user_id": record["user_id"],
+            "username": record["username"],
+            "display_name": record["display_name"],
+        }
+        self._save_to_db(wallet)
+        self._cache = wallet
+
+        self._save_encrypted_json(f"wallet_dir_user_{self.user_id}", record)
+        if record["public_key"]:
+            self._save_encrypted_json(f"wallet_dir_address_{record['public_key']}", record)
+        if record["username"]:
+            self._save_encrypted_json(f"wallet_dir_alias_{record['username']}", record)
+        return record
+
+    def get_wallet_by_user_id(self, user_id: str) -> dict | None:
+        key = f"wallet_{str(user_id or '').strip()}"
+        if key == self.db_key:
+            return self.get_wallet_info()
+        return self._load_encrypted_json(key)
+
+    def lookup_wallet_by_user_id(self, user_id: str) -> dict | None:
+        wallet = self.get_wallet_by_user_id(user_id)
+        if not wallet:
+            return None
+        owner = wallet.get("owner") or {}
+        return {
+            "user_id": str(user_id),
+            "public_key": wallet.get("public_key", ""),
+            "username": owner.get("username", ""),
+            "display_name": owner.get("display_name", ""),
+        }
+
+    def lookup_wallet_by_address(self, public_key: str) -> dict | None:
+        address = str(public_key or "").strip()
+        if not address:
+            return None
+        record = self._load_encrypted_json(f"wallet_dir_address_{address}")
+        if not record:
+            return None
+        user_id = str(record.get("user_id") or "").strip()
+        if not user_id:
+            return record
+        return self.lookup_wallet_by_user_id(user_id) or record
+
+    def lookup_wallet_by_alias(self, alias: str) -> dict | None:
+        alias_key = _normalize_alias_key(alias)
+        if not alias_key:
+            return None
+        record = self._load_encrypted_json(f"wallet_dir_alias_{alias_key}")
+        if not record:
+            return None
+        user_id = str(record.get("user_id") or "").strip()
+        if not user_id:
+            return record
+        return self.lookup_wallet_by_user_id(user_id) or record
 
     def has_wallet(self) -> bool:
         if self._cache:

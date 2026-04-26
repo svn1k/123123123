@@ -468,6 +468,42 @@ class ConsumerAgent:
 
         return address
 
+    def _make_target(
+        self,
+        address: str,
+        alias: str = "",
+        kind: str = "address",
+        category: str = "",
+        note: str = "",
+        wallet_match: dict | None = None,
+    ) -> dict:
+        if wallet_match:
+            return {
+                "address": self._normalize_solana_address(wallet_match.get("public_key", address), "recipient"),
+                "alias": alias or (f"@{wallet_match.get('username')}" if wallet_match.get("username") else ""),
+                "kind": kind,
+                "category": category,
+                "note": note,
+                "wallet_user_id": str(wallet_match.get("user_id", "") or ""),
+                "wallet_username": str(wallet_match.get("username", "") or ""),
+                "wallet_display_name": str(wallet_match.get("display_name", "") or ""),
+                "is_internal_wallet": True,
+                "delivery_preference": "ephemeral",
+            }
+
+        return {
+            "address": self._normalize_solana_address(address, "recipient"),
+            "alias": alias,
+            "kind": kind,
+            "category": category,
+            "note": note,
+            "wallet_user_id": "",
+            "wallet_username": "",
+            "wallet_display_name": "",
+            "is_internal_wallet": False,
+            "delivery_preference": "base",
+        }
+
     def _resolve_saved_target(self, value: str, field_name: str = "recipient") -> dict:
         raw = str(value or "").strip()
         if not raw:
@@ -478,28 +514,45 @@ class ConsumerAgent:
 
         saved = self.profile.resolve_alias(raw)
         if saved:
-            address = self._normalize_solana_address(saved["address"], field_name)
-            return {
-                "address": address,
-                "alias": saved.get("alias", ""),
-                "kind": saved.get("kind", "address"),
-                "category": saved.get("category", ""),
-                "note": saved.get("note", ""),
-            }
+            wallet_match = None
+            if saved.get("wallet_user_id"):
+                wallet_match = self.wallet_mgr.lookup_wallet_by_user_id(saved.get("wallet_user_id", ""))
+            if not wallet_match:
+                wallet_match = self.wallet_mgr.lookup_wallet_by_address(saved.get("address", ""))
+            return self._make_target(
+                address=saved["address"],
+                alias=saved.get("alias", ""),
+                kind=saved.get("kind", "address"),
+                category=saved.get("category", ""),
+                note=saved.get("note", ""),
+                wallet_match=wallet_match,
+            )
+
+        wallet_match = self.wallet_mgr.lookup_wallet_by_alias(raw)
+        if wallet_match:
+            return self._make_target(
+                address=wallet_match.get("public_key", ""),
+                alias=f"@{wallet_match.get('username')}" if wallet_match.get("username") else raw,
+                kind="bot_wallet",
+                wallet_match=wallet_match,
+            )
 
         if alias_input:
             raise ValueError(
-                f"Alias @{raw} is not saved yet. Save it first with a valid Solana address, "
-                f"for example: Save @{raw} as SOLANA_ADDRESS."
+                f"Alias @{raw} is not saved yet, and no bot wallet with that username was found. "
+                f"Save it first with a valid Solana address or a known bot username."
             )
 
-        return {
-            "address": self._normalize_solana_address(raw, field_name),
-            "alias": "",
-            "kind": "address",
-            "category": "",
-            "note": "",
-        }
+        address = self._normalize_solana_address(raw, field_name)
+        wallet_match = self.wallet_mgr.lookup_wallet_by_address(address)
+        return self._make_target(
+            address=address,
+            alias="",
+            kind="address",
+            category="",
+            note="",
+            wallet_match=wallet_match,
+        )
 
     def _recipient_seen_before(self, address: str) -> bool:
         history = self.storage.get_history(limit=100000, period="all")
@@ -631,6 +684,8 @@ class ConsumerAgent:
             "recipient": recipient_info["address"],
             "recipient_alias": recipient_info.get("alias", ""),
             "recipient_kind": recipient_info.get("kind", "address"),
+            "recipient_user_id": recipient_info.get("wallet_user_id", ""),
+            "recipient_internal_wallet": bool(recipient_info.get("is_internal_wallet", False)),
             "budget_category": str(budget_category or record_type).lower(),
         }
         if extra_metadata:
@@ -655,6 +710,11 @@ class ConsumerAgent:
             "kind": "self",
             "category": "",
             "note": "",
+            "wallet_user_id": self.user_id,
+            "wallet_username": "",
+            "wallet_display_name": "",
+            "is_internal_wallet": True,
+            "delivery_preference": "ephemeral",
         }
 
     async def _call_api(self, messages: list) -> dict:
@@ -798,21 +858,37 @@ class ConsumerAgent:
 
         return {"message": "✅ Payment completed.", "keyboard": None, "history": []}
 
-    async def _deposit_then_transfer(self, amount: float, recipient: str, memo: str) -> dict:
+    async def _deposit_then_transfer(self, amount: float, recipient_info: dict, memo: str) -> dict:
+        recipient = recipient_info["address"]
+        to_balance = recipient_info.get("delivery_preference") or (
+            "ephemeral" if recipient_info.get("is_internal_wallet") else "base"
+        )
         try:
-            return await self.mb_client.private_transfer(recipient=recipient, amount=amount, memo=memo)
+            logger.info(
+                f"Private transfer route selected: fromBalance=base toBalance={to_balance} "
+                f"internal={recipient_info.get('is_internal_wallet', False)} recipient={recipient[:8]}..."
+            )
+            return await self.mb_client.private_transfer(
+                recipient=recipient,
+                amount=amount,
+                memo=memo,
+                from_balance="base",
+                to_balance=to_balance,
+            )
         except ValueError as e:
             err = str(e)
             if "402" in err or "nsufficien" in err or "insufficient" in err.lower():
-                logger.info(f"PER insufficient — depositing {amount} USDC from Solana and retrying")
-                dep = await self.mb_client.deposit_to_per(amount)
-                self.storage.add_record(
-                    type="deposit",
-                    description="Auto-deposit to PER",
-                    amount=amount,
-                    tx_id=dep.get("tx_id", ""),
+                logger.info(
+                    f"Base-balance private transfer insufficient or unavailable; retrying from PER "
+                    f"with toBalance={to_balance}"
                 )
-                return await self.mb_client.private_transfer(recipient=recipient, amount=amount, memo=memo)
+                return await self.mb_client.private_transfer(
+                    recipient=recipient,
+                    amount=amount,
+                    memo=memo,
+                    from_balance="ephemeral",
+                    to_balance=to_balance,
+                )
             raise
 
     async def _run_due_recurring(self, limit: int | None = None) -> dict:
@@ -841,7 +917,7 @@ class ConsumerAgent:
             memo = item.get("memo") or f"Recurring payment {item['id']}"
             result = await self._deposit_then_transfer(
                 amount=float(item["amount"]),
-                recipient=recipient_info["address"],
+                recipient_info=recipient_info,
                 memo=memo,
             )
             self.profile.mark_recurring_executed(item["id"], result.get("tx_id", ""))
@@ -879,7 +955,15 @@ class ConsumerAgent:
 
             if tool_name == "save_contact":
                 target = self._resolve_saved_target(args["address"], "contact")
-                contact = self.profile.save_contact(args["alias"], target["address"], args.get("note", ""))
+                contact = self.profile.save_contact(
+                    args["alias"],
+                    target["address"],
+                    args.get("note", ""),
+                    wallet_user_id=target.get("wallet_user_id", ""),
+                    wallet_username=target.get("wallet_username", ""),
+                    wallet_display_name=target.get("wallet_display_name", ""),
+                    is_internal_wallet=bool(target.get("is_internal_wallet", False)),
+                )
                 return {"success": True, "contact": contact}
 
             if tool_name == "list_contacts":
@@ -897,6 +981,10 @@ class ConsumerAgent:
                     category=args.get("category", "general"),
                     note=args.get("note", ""),
                     default_amount=float(args.get("default_amount", 0.0) or 0.0),
+                    wallet_user_id=target.get("wallet_user_id", ""),
+                    wallet_username=target.get("wallet_username", ""),
+                    wallet_display_name=target.get("wallet_display_name", ""),
+                    is_internal_wallet=bool(target.get("is_internal_wallet", False)),
                 )
                 return {"success": True, "merchant": merchant}
 
@@ -954,7 +1042,7 @@ class ConsumerAgent:
                 memo = payload.get("description", "Invoice payment")
                 result = await self._deposit_then_transfer(
                     amount=amount,
-                    recipient=recipient_info["address"],
+                    recipient_info=recipient_info,
                     memo=memo,
                 )
                 self._record_payment(
@@ -1070,7 +1158,7 @@ class ConsumerAgent:
                     return {"success": False, "error": "; ".join(guardrails["blockers"])}
                 result = await self._deposit_then_transfer(
                     amount=amount,
-                    recipient=recipient_info["address"],
+                    recipient_info=recipient_info,
                     memo=args.get("memo", ""),
                 )
                 self._record_payment(
@@ -1088,7 +1176,11 @@ class ConsumerAgent:
                     "amount": amount,
                     "network": self.network_label,
                     "warnings": guardrails["warnings"],
-                    "note": "Funds sent to recipient PER balance. Recipient checks balance via bot or withdraws from PER.",
+                    "note": (
+                        "Funds sent to the recipient's private bot wallet balance."
+                        if recipient_info.get("is_internal_wallet")
+                        else "Funds sent privately to the recipient wallet address."
+                    ),
                 }
 
             if tool_name == "book_service":
@@ -1112,7 +1204,7 @@ class ConsumerAgent:
                     return {"success": False, "error": "; ".join(guardrails["blockers"])}
                 result = await self._deposit_then_transfer(
                     amount=amount,
-                    recipient=recipient_info["address"],
+                    recipient_info=recipient_info,
                     memo=f"Booking: {args['description']}",
                 )
                 self._record_payment(
@@ -1156,7 +1248,7 @@ class ConsumerAgent:
                     return {"success": False, "error": "; ".join(guardrails["blockers"])}
                 result = await self._deposit_then_transfer(
                     amount=amount,
-                    recipient=recipient_info["address"],
+                    recipient_info=recipient_info,
                     memo=f"Purchase: {args['product_name']}",
                 )
                 self._record_payment(

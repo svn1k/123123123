@@ -169,6 +169,18 @@ def set_use_devnet(context: ContextTypes.DEFAULT_TYPE, value: bool):
     context.user_data[NETWORK_KEY] = value
 
 
+def sync_wallet_directory(update: Update, wallet_mgr: WalletManager):
+    try:
+        user = update.effective_user
+        wallet_mgr.sync_directory(
+            username=getattr(user, "username", "") or "",
+            first_name=getattr(user, "first_name", "") or "",
+            last_name=getattr(user, "last_name", "") or "",
+        )
+    except Exception as e:
+        logger.warning(f"Failed to sync wallet directory for user {getattr(update.effective_user, 'id', 'unknown')}: {e}")
+
+
 # ─── Commands ─────────────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -179,6 +191,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not wallet_mgr.has_wallet():
         wallet = wallet_mgr.create_wallet()
+        sync_wallet_directory(update, wallet_mgr)
         await update.message.reply_text(
             f"👋 Welcome, *{user.first_name}*!\n\n"
             f"🆕 New Solana wallet created:\n"
@@ -201,6 +214,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         wallet = wallet_mgr.get_wallet_info()
+        sync_wallet_directory(update, wallet_mgr)
         pk = wallet['public_key']
         await update.message.reply_text(
             f"👋 Welcome back, *{user.first_name}*!\n\n"
@@ -425,6 +439,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not wallet_mgr.has_wallet():
         await update.message.reply_text("❌ Please run /start first")
         return
+    sync_wallet_directory(update, wallet_mgr)
 
     thinking_msg = await update.message.reply_text("🤔 Thinking...")
     use_devnet = get_use_devnet(context)
@@ -499,7 +514,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         save_contact_match = re.search(
-            r"^\s*save\s+(@?[A-Za-z0-9_]+)\s+as(?:\s+alias)?\s+([1-9A-HJ-NP-Za-km-z]{32,44})\s*$",
+            r"^\s*save\s+(.+?)\s+as(?:\s+alias)?\s+(@?[A-Za-z0-9_]+|[1-9A-HJ-NP-Za-km-z]{32,44})\s*$",
             text,
             re.IGNORECASE,
         )
