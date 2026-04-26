@@ -472,7 +472,8 @@ class ConsumerAgent:
         raw = str(value or "").strip()
         if not raw:
             raise ValueError(f"Missing {field_name}.")
-        if raw.startswith("@"):
+        alias_input = raw.startswith("@")
+        if alias_input:
             raw = raw[1:]
 
         saved = self.profile.resolve_alias(raw)
@@ -485,6 +486,12 @@ class ConsumerAgent:
                 "category": saved.get("category", ""),
                 "note": saved.get("note", ""),
             }
+
+        if alias_input:
+            raise ValueError(
+                f"Alias @{raw} is not saved yet. Save it first with a valid Solana address, "
+                f"for example: Save @{raw} as SOLANA_ADDRESS."
+            )
 
         return {
             "address": self._normalize_solana_address(raw, field_name),

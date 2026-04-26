@@ -36,9 +36,26 @@ def html_code(text: str) -> str:
     return f"<code>{html_escape(text)}</code>"
 
 
+def sanitize_markdown_text(text: str) -> str:
+    if not text:
+        return text
+    # GitHub/LLM output often uses **bold**, while Telegram Markdown expects *bold*.
+    text = re.sub(r"\*\*(.+?)\*\*", r"*\1*", text)
+    # Escape underscores in @handles so saved aliases like @name_with_underscore don't break parsing.
+    text = re.sub(
+        r"@([A-Za-z0-9_]+)",
+        lambda m: "@" + m.group(1).replace("_", r"\_"),
+        text,
+    )
+    return text
+
+
 async def safe_edit_message_text(message, text: str, **kwargs):
+    rendered_text = text
+    if kwargs.get("parse_mode") == ParseMode.MARKDOWN:
+        rendered_text = sanitize_markdown_text(text)
     try:
-        return await message.edit_text(text, **kwargs)
+        return await message.edit_text(rendered_text, **kwargs)
     except Exception as e:
         logger.warning(f"Formatted message failed, retrying without parse mode: {e}")
         fallback_kwargs = dict(kwargs)

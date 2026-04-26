@@ -26,6 +26,7 @@ EPHEMERAL_RPC_DEVNET  = "https://devnet.magicblock.app"
 EPHEMERAL_RPC_MAINNET = "https://mainnet.magicblock.app"
 TEE_RPC_DEVNET = "https://devnet-tee.magicblock.app"
 TEE_RPC_MAINNET = "https://mainnet-tee.magicblock.app"
+TEE_VALIDATOR = "MTEWGuqxUpYZGFJQcp8tLN7x5v9BSeoFHYWQQ3n3xzo"
 
 USDC_DECIMALS = 6
 
@@ -50,7 +51,7 @@ class MagicBlockClient:
         if self.use_devnet:
             self.cluster          = "devnet"
             self.mint             = USDC_DEVNET
-            self.validator        = config.MAGICBLOCK_VALIDATOR or None
+            self.validator        = config.MAGICBLOCK_VALIDATOR or TEE_VALIDATOR
             self.rpc_url          = RPC_DEVNET
             self.router_url       = ROUTER_DEVNET
             self.ephemeral_rpc_url = EPHEMERAL_RPC_DEVNET
@@ -58,7 +59,7 @@ class MagicBlockClient:
         else:
             self.cluster          = "mainnet"
             self.mint             = USDC_MAINNET
-            self.validator        = config.MAGICBLOCK_VALIDATOR or None
+            self.validator        = config.MAGICBLOCK_VALIDATOR or TEE_VALIDATOR
             self.rpc_url          = RPC_MAINNET
             self.router_url       = ROUTER_MAINNET
             self.ephemeral_rpc_url = EPHEMERAL_RPC_MAINNET
@@ -68,10 +69,6 @@ class MagicBlockClient:
     def authorization_token(self):
         if self.config.MAGICBLOCK_AUTHORIZATION:
             return self.config.MAGICBLOCK_AUTHORIZATION
-        # Devnet can still use the public ER endpoint directly.
-        # Only auto-fetch a TEE token when we're on mainnet.
-        if self.use_devnet:
-            return ""
         return self._ensure_authorization_token()
 
     def _coerce_expiry_ms(self, value) -> int:
@@ -143,8 +140,7 @@ class MagicBlockClient:
     def _get_private_tee_rpc_url(self) -> str | None:
         """
         Возвращает приватный TEE RPC endpoint с токеном, если авторизация доступна.
-        Для mainnet токен получаем автоматически, для devnet — используем только
-        явно переданный MAGICBLOCK_AUTHORIZATION.
+        Для private ER/PER запросов и на mainnet, и на devnet нужен auth token.
         """
         try:
             token = self.authorization_token
@@ -161,19 +157,67 @@ class MagicBlockClient:
             private_tee_rpc = self._get_private_tee_rpc_url()
             submit_candidates = self._dedupe_urls([
                 private_tee_rpc,
-                self.ephemeral_rpc_url,
                 self.router_url,
+                self.ephemeral_rpc_url,
             ])
             confirm_candidates = self._dedupe_urls([
                 private_tee_rpc,
-                self.ephemeral_rpc_url,
                 self.router_url,
+                self.ephemeral_rpc_url,
                 self.rpc_url,
             ])
         else:
             submit_candidates = self._dedupe_urls([self.rpc_url, self.router_url])
             confirm_candidates = self._dedupe_urls([self.rpc_url, self.router_url])
         return submit_candidates, confirm_candidates
+
+    def _get_mint_init_params(self) -> dict:
+        params = {
+            "mint": self.mint,
+            "cluster": self.cluster,
+        }
+        if self.validator:
+            params["validator"] = self.validator
+        return params
+
+    async def _is_mint_initialized(self) -> bool:
+        params = self._get_mint_init_params()
+        async with httpx.AsyncClient(timeout=15) as http:
+            r = await http.get(f"{PAYMENTS_API}/is-mint-initialized", params=params)
+            r.raise_for_status()
+            data = r.json()
+            return bool(data.get("initialized"))
+
+    async def _initialize_mint_if_needed(self):
+        try:
+            initialized = await self._is_mint_initialized()
+        except Exception as e:
+            logger.warning(f"Mint initialization status check failed: {e}")
+            return
+
+        if initialized:
+            return
+
+        wallet = self.wallet_mgr.get_wallet_info()
+        payload = {
+            "owner": wallet["public_key"],
+            "mint": self.mint,
+            "cluster": self.cluster,
+        }
+        if self.validator:
+            payload["validator"] = self.validator
+
+        logger.info(f"Mint transfer queue is not initialized for {self.mint}; initializing now")
+        async with httpx.AsyncClient(timeout=30) as http:
+            r = await http.post(f"{PAYMENTS_API}/initialize-mint", json=payload)
+            r.raise_for_status()
+            tx_data = r.json()
+
+        send_to = tx_data.get("sendTo", "base")
+        if send_to == "base":
+            self._sign_and_send_tx_base_single_path(tx_data["transactionBase64"])
+        else:
+            self._sign_and_send_tx(tx_data["transactionBase64"], send_to=send_to)
 
     async def _get_balance_via_rpc(self, pubkey: str) -> float:
         """Fallback: USDC баланс через Solana JSON-RPC."""
@@ -244,6 +288,8 @@ class MagicBlockClient:
                     if confirmation in {"confirmed", "finalized"}:
                         logger.info(f"Transaction {signature} reached {confirmation} via {rpc_url}")
                         return
+                except ValueError:
+                    raise
                 except Exception as e:
                     logger.warning(f"getSignatureStatuses via {rpc_url} failed: {e}")
 
@@ -432,6 +478,7 @@ class MagicBlockClient:
         }
 
     async def private_transfer(self, recipient: str, amount: float, memo: str = "") -> dict:
+        await self._initialize_mint_if_needed()
         wallet = self.wallet_mgr.get_wallet_info()
         payload = {
             "from":        wallet["public_key"],
@@ -462,6 +509,7 @@ class MagicBlockClient:
         return {"success": True, "tx_id": sig, "amount": amount}
 
     async def deposit_to_per(self, amount: float) -> dict:
+        await self._initialize_mint_if_needed()
         wallet = self.wallet_mgr.get_wallet_info()
         payload = {
             "owner":              wallet["public_key"],
@@ -486,6 +534,7 @@ class MagicBlockClient:
         return {"success": True, "tx_id": sig, "amount": amount}
 
     async def withdraw_from_per(self, amount: float) -> dict:
+        await self._initialize_mint_if_needed()
         wallet = self.wallet_mgr.get_wallet_info()
         payload = {
             "owner":      wallet["public_key"],
