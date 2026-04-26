@@ -130,28 +130,33 @@ class MagicBlockClient:
 
         solana_usdc  = 0.0
         private_usdc = 0.0
+        api_per_ok   = False
         demo_mode    = False
 
         async with httpx.AsyncClient(timeout=15) as http:
-            # 1. Публичный баланс — fallback на RPC если payments API недоступен
+            # 1. Публичный баланс через RPC (самый надёжный для devnet)
             try:
-                params = {"address": pubkey, "mint": self.mint, "cluster": self.cluster}
-                r = await http.get(f"{PAYMENTS_API}/balance", params=params)
-                logger.info(f"Balance API: status={r.status_code} body={r.text[:200]}")
-                r.raise_for_status()
-                data = r.json()
-                solana_usdc = _from_base_units(
-                    data.get("balance", "0"), data.get("decimals", USDC_DECIMALS)
-                )
+                solana_usdc = await self._get_balance_via_rpc(pubkey)
+                logger.info(f"RPC Solana USDC: {solana_usdc}")
             except Exception as e:
-                logger.warning(f"Balance API unavailable ({e}), falling back to Solana RPC")
+                logger.warning(f"RPC balance failed: {e}")
+                # Fallback на MagicBlock balance API
                 try:
-                    solana_usdc = await self._get_balance_via_rpc(pubkey)
+                    params = {"address": pubkey, "mint": self.mint, "cluster": self.cluster}
+                    r = await http.get(f"{PAYMENTS_API}/balance", params=params)
+                    logger.info(f"Balance API: status={r.status_code} body={r.text[:200]}")
+                    if r.is_success:
+                        data = r.json()
+                        solana_usdc = _from_base_units(
+                            data.get("balance", "0"), data.get("decimals", USDC_DECIMALS)
+                        )
+                    else:
+                        demo_mode = True
                 except Exception as e2:
-                    logger.warning(f"RPC fallback failed: {e2}")
+                    logger.warning(f"Balance API also failed: {e2}")
                     demo_mode = True
 
-            # 2. Приватный баланс — пробуем owner и address (разные версии API)
+            # 2. Приватный баланс — пробуем owner и address
             for pk_field in ("owner", "address"):
                 try:
                     params_priv = {
@@ -164,14 +169,36 @@ class MagicBlockClient:
                     logger.info(f"Private-balance ({pk_field}): status={r.status_code} body={r.text[:300]}")
                     if r.is_success:
                         data = r.json()
-                        private_usdc = _from_base_units(
+                        val = _from_base_units(
                             data.get("balance", "0"), data.get("decimals", USDC_DECIMALS)
                         )
-                        break  # успешно — не пробуем второй параметр
+                        if val > 0:
+                            private_usdc = val
+                            api_per_ok = True
+                        break
                     else:
                         logger.warning(f"Private-balance ({pk_field}) non-2xx: {r.status_code} {r.text[:200]}")
                 except Exception as e:
-                    logger.warning(f"Private-balance ({pk_field}) error: {e}", exc_info=True)
+                    logger.warning(f"Private-balance ({pk_field}) error: {e}")
+
+        # 3. Если API вернул 0 для PER — считаем локально из истории storage
+        #    deposit увеличивает PER, withdraw/send уменьшают
+        if not api_per_ok:
+            try:
+                from storage import SpendingStorage
+                user_id = self.wallet_mgr.user_id
+                st = SpendingStorage(user_id)
+                records = st.get_history(limit=1000, period="all")
+                local_per = 0.0
+                for r in records:
+                    if r["type"] == "deposit":
+                        local_per += r["amount"]
+                    elif r["type"] in ("send", "booking", "purchase", "withdraw"):
+                        local_per -= r["amount"]
+                private_usdc = max(0.0, round(local_per, 6))
+                logger.info(f"Local PER estimate from history: {private_usdc}")
+            except Exception as e:
+                logger.warning(f"Local PER estimate failed: {e}")
 
         explorer_base = "https://explorer.solana.com/address"
         cluster_param = f"?cluster={self.cluster}"
@@ -180,6 +207,7 @@ class MagicBlockClient:
             "private_usdc": private_usdc,
             "total":        solana_usdc + private_usdc,
             "demo_mode":    demo_mode,
+            "per_estimated": not api_per_ok,
             "explorer_url": f"{explorer_base}/{wallet['public_key']}{cluster_param}",
         }
 

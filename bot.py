@@ -154,10 +154,12 @@ async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"_Your address:_ `{pk}`"
             )
 
+        per_prefix = "\\~" if balances.get("per_estimated") else ""
+        per_note = " _(estimated)_" if balances.get("per_estimated") else ""
         await msg.edit_text(
             f"💰 *Your Balance*\n\n"
             f"🌐 Solana \\(public\\): `{balances['solana_usdc']:.4f} USDC`\n"
-            f"🔒 Private PER: `{balances['private_usdc']:.4f} USDC`\n\n"
+            f"🔒 Private PER: `{per_prefix}{balances['private_usdc']:.4f} USDC`{per_note}\\n\\n"
             f"📍 Wallet:\n`{pk}`\n\n"
             f"🔍 [View on Solana Explorer]({explorer_url})"
             + demo_note + faucet_note,

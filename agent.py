@@ -295,6 +295,29 @@ class ConsumerAgent:
 
         return {"message": "✅ Payment completed.", "keyboard": None, "history": []}
 
+    async def _deposit_then_transfer(self, amount: float, recipient: str, memo: str) -> dict:
+        """
+        Optimistic transfer: try direct transfer first.
+        If PER balance insufficient (402) — deposit from Solana then retry.
+        Balance API is unreliable, so we let the blockchain decide.
+        """
+        try:
+            return await self.mb_client.private_transfer(recipient=recipient, amount=amount, memo=memo)
+        except ValueError as e:
+            err = str(e)
+            if "402" in err or "nsufficien" in err or "insufficient" in err.lower():
+                logger.info(f"PER insufficient — depositing {amount} USDC from Solana and retrying")
+                dep = await self.mb_client.deposit_to_per(amount)
+                # Записываем депозит в историю для локального трекинга PER баланса
+                self.storage.add_record(
+                    type="deposit",
+                    description="Auto-deposit to PER",
+                    amount=amount,
+                    tx_id=dep.get("tx_id", ""),
+                )
+                return await self.mb_client.private_transfer(recipient=recipient, amount=amount, memo=memo)
+            raise
+
     async def _execute_tool(self, tool_name: str, args: dict) -> dict:
         logger.info(f"Tool: {tool_name}({args})")
         try:
@@ -303,25 +326,9 @@ class ConsumerAgent:
 
             elif tool_name == "private_transfer":
                 amount = args["amount"]
-                # Авто-депозит если PER баланс недостаточен
-                try:
-                    balance = await self.mb_client.get_balance()
-                    if balance["private_usdc"] < amount:
-                        needed = round(amount - balance["private_usdc"], 6)
-                        if balance["solana_usdc"] >= needed:
-                            logger.info(f"Auto-depositing {needed} USDC to PER")
-                            await self.mb_client.deposit_to_per(needed)
-                        else:
-                            return {
-                                "success": False,
-                                "error": f"Insufficient funds. Solana: {balance['solana_usdc']:.2f}, PER: {balance['private_usdc']:.2f}, need: {amount:.2f} USDC"
-                            }
-                except Exception as e:
-                    logger.warning(f"Auto-deposit check failed: {e}")
-
-                result = await self.mb_client.private_transfer(
-                    recipient=args["recipient"],
+                result = await self._deposit_then_transfer(
                     amount=amount,
+                    recipient=args["recipient"],
                     memo=args.get("memo", "")
                 )
                 self.storage.add_record(
@@ -336,19 +343,9 @@ class ConsumerAgent:
             elif tool_name == "book_service":
                 merchant = args.get("merchant_address", config.DEMO_MERCHANT_ADDRESS)
                 amount = args["amount"]
-                # Авто-депозит
-                try:
-                    balance = await self.mb_client.get_balance()
-                    if balance["private_usdc"] < amount:
-                        needed = round(amount - balance["private_usdc"], 6)
-                        if balance["solana_usdc"] >= needed:
-                            await self.mb_client.deposit_to_per(needed)
-                except Exception as e:
-                    logger.warning(f"Auto-deposit check failed: {e}")
-
-                result = await self.mb_client.private_transfer(
-                    recipient=merchant,
+                result = await self._deposit_then_transfer(
                     amount=amount,
+                    recipient=merchant,
                     memo=f"Booking: {args['description']}"
                 )
                 self.storage.add_record(
@@ -363,19 +360,9 @@ class ConsumerAgent:
             elif tool_name == "buy_product":
                 merchant = args.get("merchant_address", config.DEMO_MERCHANT_ADDRESS)
                 amount = args["amount"]
-                # Авто-депозит
-                try:
-                    balance = await self.mb_client.get_balance()
-                    if balance["private_usdc"] < amount:
-                        needed = round(amount - balance["private_usdc"], 6)
-                        if balance["solana_usdc"] >= needed:
-                            await self.mb_client.deposit_to_per(needed)
-                except Exception as e:
-                    logger.warning(f"Auto-deposit check failed: {e}")
-
-                result = await self.mb_client.private_transfer(
-                    recipient=merchant,
+                result = await self._deposit_then_transfer(
                     amount=amount,
+                    recipient=merchant,
                     memo=f"Purchase: {args['product_name']}"
                 )
                 self.storage.add_record(
