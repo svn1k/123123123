@@ -191,13 +191,15 @@ class MagicBlockClient:
                 private_tee_rpc,
             ])
         else:
-            submit_candidates = self._dedupe_urls([self.router_url, self.rpc_url])
-            confirm_candidates = self._dedupe_urls([self.router_url, self.rpc_url])
+            private_tee_rpc = self._get_private_tee_rpc_url()
+            submit_candidates = self._dedupe_urls([private_tee_rpc, self.router_url, self.rpc_url])
+            confirm_candidates = self._dedupe_urls([private_tee_rpc, self.router_url, self.rpc_url])
         return submit_candidates, confirm_candidates
 
     def _get_confirm_candidates_for_submit(self, send_to: str, submit_url: str, validator: str | None = None) -> list[str]:
         if send_to != "ephemeral":
-            return self._dedupe_urls([submit_url, self.router_url, self.rpc_url])
+            private_tee_rpc = self._get_private_tee_rpc_url()
+            return self._dedupe_urls([submit_url, private_tee_rpc, self.router_url, self.rpc_url])
 
         target_rpc = self._get_ephemeral_rpc_for_validator(validator)
         private_tee_rpc = self._get_private_tee_rpc_url() if (validator or self.validator) == TEE_VALIDATOR else None
@@ -459,7 +461,7 @@ class MagicBlockClient:
             signed_bytes = bytes(tx)
 
         signed_b64 = base64.b64encode(signed_bytes).decode()
-        submit_candidates = self._dedupe_urls([self.router_url, self.rpc_url])
+        submit_candidates = self._dedupe_urls([self._get_private_tee_rpc_url(), self.router_url, self.rpc_url])
         last_error = None
         last_signature = None
 
