@@ -21,9 +21,27 @@ RPC_MAINNET = "https://api.mainnet-beta.solana.com"
 ROUTER_DEVNET = "https://devnet-router.magicblock.app"
 ROUTER_MAINNET = "https://router.magicblock.app"
 
-# MagicBlock ephemeral validator RPC (для транзакций в rollup)
-EPHEMERAL_RPC_DEVNET  = "https://devnet.magicblock.app"
-EPHEMERAL_RPC_MAINNET = "https://mainnet.magicblock.app"
+DEVNET_AS_VALIDATOR = "MAS1Dt9qreoRMQ14YQuhg8UTZMMzDdKhmkZMECCzk57"
+DEVNET_EU_VALIDATOR = "MEUGGrYPxKk17hCr7wpT6s8dtNokZj5U2L57vjYMS8e"
+DEVNET_US_VALIDATOR = "MUS3hc9TCw4cGC12vHNoYcCGzJG1txjgQLZWVoeNHNd"
+TEE_VALIDATOR = "MTEWGuqxUpYZGFJQcp8tLN7x5v9BSeoFHYWQQ3n3xzo"
+
+# MagicBlock validator RPCs
+DEVNET_VALIDATOR_URLS = {
+    DEVNET_AS_VALIDATOR: "https://devnet-as.magicblock.app",
+    DEVNET_EU_VALIDATOR: "https://devnet-eu.magicblock.app",
+    DEVNET_US_VALIDATOR: "https://devnet-us.magicblock.app",
+    TEE_VALIDATOR: "https://devnet-tee.magicblock.app",
+}
+MAINNET_VALIDATOR_URLS = {
+    DEVNET_AS_VALIDATOR: "https://as.magicblock.app",
+    DEVNET_EU_VALIDATOR: "https://eu.magicblock.app",
+    DEVNET_US_VALIDATOR: "https://us.magicblock.app",
+    TEE_VALIDATOR: "https://mainnet-tee.magicblock.app",
+}
+
+EPHEMERAL_RPC_DEVNET  = DEVNET_VALIDATOR_URLS[DEVNET_US_VALIDATOR]
+EPHEMERAL_RPC_MAINNET = MAINNET_VALIDATOR_URLS[DEVNET_US_VALIDATOR]
 TEE_RPC_DEVNET = "https://devnet-tee.magicblock.app"
 TEE_RPC_MAINNET = "https://mainnet-tee.magicblock.app"
 
@@ -50,18 +68,18 @@ class MagicBlockClient:
         if self.use_devnet:
             self.cluster          = "devnet"
             self.mint             = USDC_DEVNET
-            self.validator        = config.MAGICBLOCK_VALIDATOR or None
+            self.validator        = config.MAGICBLOCK_VALIDATOR or DEVNET_US_VALIDATOR
             self.rpc_url          = RPC_DEVNET
             self.router_url       = ROUTER_DEVNET
-            self.ephemeral_rpc_url = EPHEMERAL_RPC_DEVNET
+            self.ephemeral_rpc_url = DEVNET_VALIDATOR_URLS.get(self.validator, EPHEMERAL_RPC_DEVNET)
             self.tee_rpc_url      = TEE_RPC_DEVNET
         else:
             self.cluster          = "mainnet"
             self.mint             = USDC_MAINNET
-            self.validator        = config.MAGICBLOCK_VALIDATOR or None
+            self.validator        = config.MAGICBLOCK_VALIDATOR or DEVNET_US_VALIDATOR
             self.rpc_url          = RPC_MAINNET
             self.router_url       = ROUTER_MAINNET
-            self.ephemeral_rpc_url = EPHEMERAL_RPC_MAINNET
+            self.ephemeral_rpc_url = MAINNET_VALIDATOR_URLS.get(self.validator, EPHEMERAL_RPC_MAINNET)
             self.tee_rpc_url      = TEE_RPC_MAINNET
 
     @property
@@ -151,16 +169,23 @@ class MagicBlockClient:
             return None
         return f"{self.tee_rpc_url}?token={quote(token, safe='')}"
 
-    def _get_rpc_candidates(self, send_to: str) -> tuple[list[str], list[str]]:
+    def _get_ephemeral_rpc_for_validator(self, validator: str | None) -> str:
+        validator = validator or self.validator
+        if self.use_devnet:
+            return DEVNET_VALIDATOR_URLS.get(validator, self.ephemeral_rpc_url)
+        return MAINNET_VALIDATOR_URLS.get(validator, self.ephemeral_rpc_url)
+
+    def _get_rpc_candidates(self, send_to: str, validator: str | None = None) -> tuple[list[str], list[str]]:
         if send_to == "ephemeral":
-            private_tee_rpc = self._get_private_tee_rpc_url()
+            target_rpc = self._get_ephemeral_rpc_for_validator(validator)
+            private_tee_rpc = self._get_private_tee_rpc_url() if (validator or self.validator) == TEE_VALIDATOR else None
             submit_candidates = self._dedupe_urls([
-                self.ephemeral_rpc_url,
+                target_rpc,
                 self.router_url,
                 private_tee_rpc,
             ])
             confirm_candidates = self._dedupe_urls([
-                self.ephemeral_rpc_url,
+                target_rpc,
                 self.router_url,
                 self.rpc_url,
                 private_tee_rpc,
@@ -170,14 +195,15 @@ class MagicBlockClient:
             confirm_candidates = self._dedupe_urls([self.rpc_url, self.router_url])
         return submit_candidates, confirm_candidates
 
-    def _get_confirm_candidates_for_submit(self, send_to: str, submit_url: str) -> list[str]:
+    def _get_confirm_candidates_for_submit(self, send_to: str, submit_url: str, validator: str | None = None) -> list[str]:
         if send_to != "ephemeral":
             return self._dedupe_urls([submit_url, self.rpc_url, self.router_url])
 
-        private_tee_rpc = self._get_private_tee_rpc_url()
-        if submit_url == self.ephemeral_rpc_url:
+        target_rpc = self._get_ephemeral_rpc_for_validator(validator)
+        private_tee_rpc = self._get_private_tee_rpc_url() if (validator or self.validator) == TEE_VALIDATOR else None
+        if submit_url == target_rpc:
             return self._dedupe_urls([
-                self.ephemeral_rpc_url,
+                target_rpc,
                 self.router_url,
                 self.rpc_url,
                 private_tee_rpc,
@@ -185,20 +211,20 @@ class MagicBlockClient:
         if submit_url == self.router_url:
             return self._dedupe_urls([
                 self.router_url,
-                self.ephemeral_rpc_url,
+                target_rpc,
                 self.rpc_url,
                 private_tee_rpc,
             ])
         if submit_url == private_tee_rpc:
             return self._dedupe_urls([
                 private_tee_rpc,
-                self.ephemeral_rpc_url,
+                target_rpc,
                 self.router_url,
                 self.rpc_url,
             ])
         return self._dedupe_urls([
             submit_url,
-            self.ephemeral_rpc_url,
+            target_rpc,
             self.router_url,
             self.rpc_url,
             private_tee_rpc,
@@ -333,7 +359,7 @@ class MagicBlockClient:
             raise ValueError(f"Transaction {signature} was submitted but not confirmed within {timeout_seconds}s.")
         raise ValueError(f"Transaction {signature} was submitted but not found on {network_name} within {timeout_seconds}s.")
 
-    def _sign_and_send_tx(self, tx_base64: str, send_to: str = "base") -> str:
+    def _sign_and_send_tx(self, tx_base64: str, send_to: str = "base", validator: str | None = None) -> str:
         """
         Подписывает транзакцию и отправляет в нужный RPC.
         send_to="ephemeral" -> MagicBlock ephemeral validator RPC
@@ -360,15 +386,16 @@ class MagicBlockClient:
             signed_bytes = bytes(tx)
 
         signed_b64 = base64.b64encode(signed_bytes).decode()
-        submit_candidates, default_confirm_candidates = self._get_rpc_candidates(send_to)
+        submit_candidates, default_confirm_candidates = self._get_rpc_candidates(send_to, validator=validator)
 
         last_error = None
+        selected_validator = validator or self.validator
         for rpc_url in submit_candidates:
             try:
-                logger.info(f"Sending tx to {rpc_url} (sendTo={send_to})")
+                logger.info(f"Sending tx to {rpc_url} (sendTo={send_to}, validator={selected_validator})")
                 signature = self._send_raw_transaction(rpc_url, signed_b64)
                 logger.info(f"Submitted tx signature: {signature}")
-                confirm_candidates = self._get_confirm_candidates_for_submit(send_to, rpc_url) or default_confirm_candidates
+                confirm_candidates = self._get_confirm_candidates_for_submit(send_to, rpc_url, validator=validator) or default_confirm_candidates
                 self._confirm_signature(signature, confirm_candidates)
                 return signature
             except Exception as e:
@@ -544,7 +571,15 @@ class MagicBlockClient:
             tx_data = r.json()
 
         send_to = tx_data.get("sendTo", "base")
-        sig = self._sign_and_send_tx(tx_data["transactionBase64"], send_to=send_to)
+        tx_validator = tx_data.get("validator") or self.validator
+        logger.info(
+            f"Private transfer prepared for validator={tx_validator} endpoint={self._get_ephemeral_rpc_for_validator(tx_validator)}"
+        )
+        sig = self._sign_and_send_tx(
+            tx_data["transactionBase64"],
+            send_to=send_to,
+            validator=tx_validator,
+        )
         return {"success": True, "tx_id": sig, "amount": amount}
 
     async def deposit_to_per(self, amount: float) -> dict:
@@ -570,7 +605,15 @@ class MagicBlockClient:
         if send_to == "base":
             sig = self._sign_and_send_tx_base_single_path(tx_data["transactionBase64"])
         else:
-            sig = self._sign_and_send_tx(tx_data["transactionBase64"], send_to=send_to)
+            tx_validator = tx_data.get("validator") or self.validator
+            logger.info(
+                f"Deposit prepared for validator={tx_validator} endpoint={self._get_ephemeral_rpc_for_validator(tx_validator)}"
+            )
+            sig = self._sign_and_send_tx(
+                tx_data["transactionBase64"],
+                send_to=send_to,
+                validator=tx_validator,
+            )
         return {"success": True, "tx_id": sig, "amount": amount}
 
     async def withdraw_from_per(self, amount: float) -> dict:
@@ -594,5 +637,13 @@ class MagicBlockClient:
         if send_to == "base":
             sig = self._sign_and_send_tx_base_single_path(tx_data["transactionBase64"])
         else:
-            sig = self._sign_and_send_tx(tx_data["transactionBase64"], send_to=send_to)
+            tx_validator = tx_data.get("validator") or self.validator
+            logger.info(
+                f"Withdraw prepared for validator={tx_validator} endpoint={self._get_ephemeral_rpc_for_validator(tx_validator)}"
+            )
+            sig = self._sign_and_send_tx(
+                tx_data["transactionBase64"],
+                send_to=send_to,
+                validator=tx_validator,
+            )
         return {"success": True, "tx_id": sig, "amount": amount}
