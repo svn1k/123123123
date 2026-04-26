@@ -165,6 +165,9 @@ async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             quote=True,
         )
         demo_note = "\n\n⚠️ <i>Demo mode: API unavailable</i>" if balances.get("demo_mode") else ""
+        private_auth_note = ""
+        if balances.get("needs_private_auth"):
+            private_auth_note = "\n\nℹ️ <i>Private PER balance is shown from local history because MagicBlock private-balance on devnet requires an authorization token.</i>"
 
         faucet_note = ""
         if balances["solana_usdc"] == 0.0 and balances["private_usdc"] == 0.0 and config.USE_DEVNET:
@@ -183,6 +186,7 @@ async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📍 Wallet:\n{html_code(pk)}\n\n"
             f'🔍 <a href="{explorer_url}">View on Solana Explorer</a>'
             + demo_note
+            + private_auth_note
             + faucet_note,
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True

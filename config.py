@@ -8,6 +8,8 @@ class Config:
     GITHUB_MODEL: str = os.getenv("GITHUB_MODEL", "openai/gpt-4o-mini")
     USE_DEVNET: bool = os.getenv("USE_DEVNET", "true").lower() == "true"
     DEMO_MERCHANT_ADDRESS: str = os.getenv("DEMO_MERCHANT_ADDRESS", "")
+    MAGICBLOCK_VALIDATOR: str = os.getenv("MAGICBLOCK_VALIDATOR", "")
+    MAGICBLOCK_AUTHORIZATION: str = os.getenv("MAGICBLOCK_AUTHORIZATION", "")
 
     # Storage paths — always use /app/data/... in Docker (mounted volume)
     # Locally defaults to ./data/...

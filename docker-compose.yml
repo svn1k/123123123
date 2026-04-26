@@ -11,6 +11,8 @@ services:
       - GITHUB_MODEL=${GITHUB_MODEL:-openai/gpt-4o}
       - USE_DEVNET=${USE_DEVNET:-true}
       - DEMO_MERCHANT_ADDRESS=${DEMO_MERCHANT_ADDRESS:-}
+      - MAGICBLOCK_VALIDATOR=${MAGICBLOCK_VALIDATOR:-}
+      - MAGICBLOCK_AUTHORIZATION=${MAGICBLOCK_AUTHORIZATION:-}
       - WALLETS_DIR=/app/data/wallets
       - STORAGE_DIR=/app/data/history
     volumes:

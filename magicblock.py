@@ -11,14 +11,13 @@ logger = logging.getLogger(__name__)
 
 PAYMENTS_API = "https://payments.magicblock.app/v1/spl"
 
-DEVNET_VALIDATOR  = "MTEWGuqxUpYZGFJQcp8tLN7x5v9BSeoFHYWQQ3n3xzo"
-MAINNET_VALIDATOR = "MTEWGuqxUpYZGFJQcp8tLN7x5v9BSeoFHYWQQ3n3xzo"
-
 USDC_DEVNET  = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"
 USDC_MAINNET = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 
 RPC_DEVNET  = "https://api.devnet.solana.com"
 RPC_MAINNET = "https://api.mainnet-beta.solana.com"
+ROUTER_DEVNET = "https://devnet-router.magicblock.app"
+ROUTER_MAINNET = "https://router.magicblock.app"
 
 # MagicBlock ephemeral validator RPC (для транзакций в rollup)
 EPHEMERAL_RPC_DEVNET  = "https://devnet.magicblock.app"
@@ -46,14 +45,16 @@ class MagicBlockClient:
         if config.USE_DEVNET:
             self.cluster          = "devnet"
             self.mint             = USDC_DEVNET
-            self.validator        = DEVNET_VALIDATOR
+            self.validator        = config.MAGICBLOCK_VALIDATOR or None
             self.rpc_url          = RPC_DEVNET
+            self.router_url       = ROUTER_DEVNET
             self.ephemeral_rpc_url = EPHEMERAL_RPC_DEVNET
         else:
             self.cluster          = "mainnet"
             self.mint             = USDC_MAINNET
-            self.validator        = MAINNET_VALIDATOR
+            self.validator        = config.MAGICBLOCK_VALIDATOR or None
             self.rpc_url          = RPC_MAINNET
+            self.router_url       = ROUTER_MAINNET
             self.ephemeral_rpc_url = EPHEMERAL_RPC_MAINNET
 
     async def _get_balance_via_rpc(self, pubkey: str) -> float:
@@ -76,6 +77,20 @@ class MagicBlockClient:
             logger.info(f"RPC USDC balance: {ui}")
             return float(ui) if ui else 0.0
 
+    def _send_raw_transaction(self, rpc_url: str, signed_b64: str) -> str:
+        payload = {
+            "jsonrpc": "2.0", "id": 1,
+            "method": "sendTransaction",
+            "params": [signed_b64, {"encoding": "base64", "skipPreflight": True}]
+        }
+        with httpx.Client(timeout=30) as http:
+            r = http.post(rpc_url, json=payload)
+            r.raise_for_status()
+            result = r.json()
+            if "error" in result:
+                raise ValueError(f"Solana RPC error: {result['error'].get('message', result['error'])}")
+            return result["result"]
+
     def _sign_and_send_tx(self, tx_base64: str, send_to: str = "base") -> str:
         """
         Подписывает транзакцию и отправляет в нужный RPC.
@@ -84,7 +99,6 @@ class MagicBlockClient:
         """
         from solders.keypair import Keypair
         from solders.transaction import VersionedTransaction
-        import httpx as _httpx
 
         wallet = self.wallet_mgr.get_wallet_info()
         keypair = Keypair.from_bytes(bytes(wallet["private_key_bytes"]))
@@ -103,26 +117,22 @@ class MagicBlockClient:
             tx.sign([keypair], blockhash)
             signed_bytes = bytes(tx)
 
-        # Выбираем RPC в зависимости от sendTo
-        if send_to == "ephemeral":
-            rpc_url = self.ephemeral_rpc_url
-        else:
-            rpc_url = self.rpc_url
-
         signed_b64 = base64.b64encode(signed_bytes).decode()
-        payload = {
-            "jsonrpc": "2.0", "id": 1,
-            "method": "sendTransaction",
-            "params": [signed_b64, {"encoding": "base64", "skipPreflight": True}]
-        }
-        logger.info(f"Sending tx to {rpc_url} (sendTo={send_to})")
-        with _httpx.Client(timeout=30) as http:
-            r = http.post(rpc_url, json=payload)
-            r.raise_for_status()
-            result = r.json()
-            if "error" in result:
-                raise ValueError(f"Solana RPC error: {result['error']['message']}")
-            return result["result"]
+        rpc_candidates = [self.router_url]
+        if send_to == "ephemeral":
+            rpc_candidates.append(self.ephemeral_rpc_url)
+        rpc_candidates.append(self.rpc_url)
+
+        last_error = None
+        for rpc_url in rpc_candidates:
+            try:
+                logger.info(f"Sending tx to {rpc_url} (sendTo={send_to})")
+                return self._send_raw_transaction(rpc_url, signed_b64)
+            except Exception as e:
+                last_error = e
+                logger.warning(f"sendTransaction via {rpc_url} failed: {e}")
+
+        raise ValueError(f"Unable to submit transaction: {last_error}")
 
     async def get_balance(self) -> dict:
         wallet = self.wallet_mgr.get_wallet_info()
@@ -142,7 +152,7 @@ class MagicBlockClient:
                 logger.warning(f"RPC balance failed: {e}")
                 # Fallback на MagicBlock balance API
                 try:
-                    params = {"owner": pubkey, "mint": self.mint, "cluster": self.cluster}
+                    params = {"address": pubkey, "mint": self.mint, "cluster": self.cluster}
                     r = await http.get(f"{PAYMENTS_API}/balance", params=params)
                     logger.info(f"Balance API: status={r.status_code} body={r.text[:200]}")
                     if r.is_success:
@@ -156,25 +166,27 @@ class MagicBlockClient:
                     logger.warning(f"Balance API also failed: {e2}")
                     demo_mode = True
 
-            # 2. Приватный баланс
-            try:
-                params_priv = {
-                    "owner": pubkey,
-                    "mint": self.mint,
-                    "cluster": self.cluster,
-                }
-                r = await http.get(f"{PAYMENTS_API}/private-balance", params=params_priv)
-                logger.info(f"Private-balance: status={r.status_code} body={r.text[:300]}")
-                if r.is_success:
-                    data = r.json()
-                    private_usdc = _from_base_units(
-                        data.get("balance", "0"), data.get("decimals", USDC_DECIMALS)
-                    )
-                    api_per_ok = True
-                else:
-                    logger.warning(f"Private-balance non-2xx: {r.status_code} {r.text[:200]}")
-            except Exception as e:
-                logger.warning(f"Private-balance error: {e}")
+            # 2. Приватный баланс можно читать только с authorization token
+            if self.config.MAGICBLOCK_AUTHORIZATION:
+                try:
+                    params_priv = {
+                        "address": pubkey,
+                        "mint": self.mint,
+                        "cluster": self.cluster,
+                        "authorization": self.config.MAGICBLOCK_AUTHORIZATION,
+                    }
+                    r = await http.get(f"{PAYMENTS_API}/private-balance", params=params_priv)
+                    logger.info(f"Private-balance: status={r.status_code} body={r.text[:300]}")
+                    if r.is_success:
+                        data = r.json()
+                        private_usdc = _from_base_units(
+                            data.get("balance", "0"), data.get("decimals", USDC_DECIMALS)
+                        )
+                        api_per_ok = True
+                    else:
+                        logger.warning(f"Private-balance non-2xx: {r.status_code} {r.text[:200]}")
+                except Exception as e:
+                    logger.warning(f"Private-balance error: {e}")
 
         # 3. Если API вернул 0 для PER — считаем локально из истории storage
         #    deposit увеличивает PER, withdraw/send уменьшают
@@ -203,20 +215,24 @@ class MagicBlockClient:
             "total":        solana_usdc + private_usdc,
             "demo_mode":    demo_mode,
             "per_estimated": not api_per_ok,
+            "needs_private_auth": not bool(self.config.MAGICBLOCK_AUTHORIZATION),
             "explorer_url": f"{explorer_base}/{wallet['public_key']}{cluster_param}",
         }
 
     async def private_transfer(self, recipient: str, amount: float, memo: str = "") -> dict:
         wallet = self.wallet_mgr.get_wallet_info()
         payload = {
-            "owner":       wallet["public_key"],
-            "destination": recipient,
+            "from":        wallet["public_key"],
+            "to":          recipient,
             "amount":      _to_base_units(amount),
             "mint":        self.mint,
             "cluster":     self.cluster,
-            "validator":   self.validator,
-            "privacy":     "private",
+            "visibility":  "private",
+            "fromBalance": "ephemeral",
+            "toBalance":   "ephemeral",
         }
+        if self.validator:
+            payload["validator"] = self.validator
         if memo:
             payload["memo"] = memo
 
@@ -240,10 +256,11 @@ class MagicBlockClient:
             "amount":             _to_base_units(amount),
             "mint":               self.mint,
             "cluster":            self.cluster,
-            "validator":          self.validator,
             "initIfMissing":      True,
             "initVaultIfMissing": True,
         }
+        if self.validator:
+            payload["validator"] = self.validator
         async with httpx.AsyncClient(timeout=30) as http:
             r = await http.post(f"{PAYMENTS_API}/deposit", json=payload)
             r.raise_for_status()
@@ -260,9 +277,10 @@ class MagicBlockClient:
             "mint":       self.mint,
             "amount":     _to_base_units(amount),
             "cluster":    self.cluster,
-            "validator":  self.validator,
             "idempotent": True,
         }
+        if self.validator:
+            payload["validator"] = self.validator
         async with httpx.AsyncClient(timeout=30) as http:
             r = await http.post(f"{PAYMENTS_API}/withdraw", json=payload)
             r.raise_for_status()
