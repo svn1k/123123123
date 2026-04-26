@@ -186,7 +186,7 @@ async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             per_note = " <i>(estimated from local history)</i>"
         else:
             private_display = "Unavailable"
-            per_note = " <i>(MagicBlock auth required)</i>"
+            per_note = " <i>(MagicBlock auth required on mainnet)</i>" if not use_devnet else " <i>(not available on devnet)</i>"
         explorer_url = html_escape(
             balances.get(
                 "explorer_url",
@@ -197,7 +197,7 @@ async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         demo_note = "\n\n⚠️ <i>Demo mode: API unavailable</i>" if balances.get("demo_mode") else ""
         private_auth_note = ""
         if balances.get("needs_private_auth"):
-            private_auth_note = "\n\nℹ️ <i>Private PER balance is shown from local history because MagicBlock private-balance on devnet requires an authorization token.</i>"
+            private_auth_note = "\n\nℹ️ <i>On mainnet, real Private PER balance requires a MagicBlock authorization token. Without it, the bot falls back to local history.</i>"
 
         faucet_note = ""
         if balances["solana_usdc"] == 0.0 and balances["private_usdc"] == 0.0 and use_devnet:

@@ -59,6 +59,14 @@ class MagicBlockClient:
             self.router_url       = ROUTER_MAINNET
             self.ephemeral_rpc_url = EPHEMERAL_RPC_MAINNET
 
+    @property
+    def authorization_token(self):
+        # Devnet currently works more reliably without private-balance authorization flow.
+        # Use MagicBlock authorization only on mainnet.
+        if self.use_devnet:
+            return ""
+        return self.config.MAGICBLOCK_AUTHORIZATION
+
     async def _get_balance_via_rpc(self, pubkey: str) -> float:
         """Fallback: USDC баланс через Solana JSON-RPC."""
         payload = {
@@ -217,13 +225,13 @@ class MagicBlockClient:
                     demo_mode = True
 
             # 2. Приватный баланс можно читать только с authorization token
-            if self.config.MAGICBLOCK_AUTHORIZATION:
+            if self.authorization_token:
                 try:
                     params_priv = {
                         "address": pubkey,
                         "mint": self.mint,
                         "cluster": self.cluster,
-                        "authorization": self.config.MAGICBLOCK_AUTHORIZATION,
+                        "authorization": self.authorization_token,
                     }
                     r = await http.get(f"{PAYMENTS_API}/private-balance", params=params_priv)
                     logger.info(f"Private-balance: status={r.status_code} body={r.text[:300]}")
@@ -274,7 +282,7 @@ class MagicBlockClient:
                 "history" if has_local_per_activity else
                 "unavailable"
             ),
-            "needs_private_auth": not bool(self.config.MAGICBLOCK_AUTHORIZATION),
+            "needs_private_auth": (not self.use_devnet) and (not bool(self.authorization_token)),
             "explorer_url": f"{explorer_base}/{wallet['public_key']}{cluster_param}",
         }
 
