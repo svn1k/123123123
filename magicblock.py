@@ -551,12 +551,17 @@ class MagicBlockClient:
         await self._initialize_mint_if_needed()
         wallet = self.wallet_mgr.get_wallet_info()
         payload = {
-            "owner":       wallet["public_key"],
-            "destination": recipient,
+            "from":        wallet["public_key"],
+            "to":          recipient,
             "amount":      _to_base_units(amount),
             "mint":        self.mint,
             "cluster":     self.cluster,
-            "privacy":     "private",
+            "visibility":  "private",
+            "fromBalance": "ephemeral",
+            "toBalance":   "ephemeral",
+            "initIfMissing": True,
+            "initAtasIfMissing": True,
+            "initVaultIfMissing": True,
         }
         if self.validator:
             payload["validator"] = self.validator
