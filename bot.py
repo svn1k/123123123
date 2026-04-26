@@ -1,11 +1,5 @@
 """
 🤖 Autonomous Consumer Agent Bot
-Telegram bot with persistent conversation context.
-
-Context lifecycle:
-  - Created:  first message to agent
-  - Grows:    every user/assistant exchange
-  - Cleared:  only after a confirmed payment (or /clear command)
 """
 
 import logging
@@ -23,6 +17,7 @@ from config import Config
 from agent import ConsumerAgent
 from storage import SpendingStorage
 from wallet import WalletManager
+from magicblock import MagicBlockClient
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -31,7 +26,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 config = Config()
 
-# context.user_data key for conversation history
 HISTORY_KEY = "chat_history"
 
 
@@ -56,13 +50,12 @@ def agent_intro_text():
         "• `Book a hotel in London for 3 nights`\n"
         "• `Buy a gift for ~50 USDC`\n"
         "• `Send 10 USDC to address ABC...`\n"
-        "• `Show my spending this week`\n"
-        "• `Find the best flight to Dubai`\n\n"
+        "• `Show my spending this week`\n\n"
         "💡 _Just write what you need_"
     )
 
 
-# ─── Helpers ──────────────────────────────────────────────────────────────────
+# ─── History helpers ──────────────────────────────────────────────────────────
 
 def get_history(context: ContextTypes.DEFAULT_TYPE) -> list:
     return context.user_data.get(HISTORY_KEY, [])
@@ -74,7 +67,7 @@ def clear_history(context: ContextTypes.DEFAULT_TYPE):
     context.user_data[HISTORY_KEY] = []
 
 
-# ─── Command Handlers ─────────────────────────────────────────────────────────
+# ─── Commands ─────────────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -84,16 +77,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not wallet_mgr.has_wallet():
         wallet = wallet_mgr.create_wallet()
         await update.message.reply_text(
-            f"\U0001f44b Welcome, *{user.first_name}*!\n\n"
-            f"\U0001f195 New Solana wallet created:\n"
+            f"👋 Welcome, *{user.first_name}*!\n\n"
+            f"🆕 New Solana wallet created:\n"
             f"`{wallet['public_key']}`\n\n"
             + agent_intro_text(),
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=main_keyboard()
         )
-        # Seed phrase with spoiler via MessageEntity (no MarkdownV2 escaping needed)
-        prefix = "\u26a0\ufe0f Save your seed phrase — tap to reveal:\n\n"
-        suffix = "\n\n\U0001f512 Never share this with anyone. Delete this message after saving."
+        prefix = "⚠️ Save your seed phrase — tap to reveal:\n\n"
+        suffix = "\n\n🔐 Never share this with anyone. Delete this message after saving."
         mnemonic = wallet['mnemonic']
         full_text = prefix + mnemonic + suffix
         await update.message.reply_text(
@@ -121,18 +113,13 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📖 *Bot Commands*\n\n"
         "/start — Start the bot\n"
         "/balance — Check balance\n"
-        "/send — Send USDC privately\n"
         "/history — Spending history\n"
         "/wallet — Wallet management\n"
-        "/deposit — Deposit to Private PER\n"
-        "/withdraw — Withdraw from PER to Solana\n"
         "/agent — Activate AI agent\n"
         "/clear — Clear conversation context\n\n"
-        "🔒 *Privacy:*\n"
-        "All transfers go through Private Ephemeral Rollup (PER) by MagicBlock.\n"
-        "Transactions are encrypted inside TEE (Intel TDX). No on-chain link between sender and receiver.\n\n"
-        "📊 *Spending history* is stored only locally on your device.\n\n"
-        "🧠 *AI:* GitHub Models (free inference — just a GitHub PAT needed)",
+        "🔒 *Privacy:* All transfers go through Private Ephemeral Rollup (PER) by MagicBlock.\n\n"
+        "📊 *Spending history* is stored only locally.\n\n"
+        "🧠 *AI:* GitHub Models (free inference)",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=main_keyboard()
     )
@@ -147,13 +134,11 @@ async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     msg = await update.message.reply_text("⏳ Fetching balance...")
-
-    from magicblock import MagicBlockClient
-    client = MagicBlockClient(wallet_mgr)
+    client = MagicBlockClient(wallet_mgr, config)
 
     try:
         balances = await client.get_balance()
-        demo_note = "\n\n⚠️ _Demo mode — connect wallet for real balances_" if balances.get("demo_mode") else ""
+        demo_note = "\n\n⚠️ _Demo mode — API unavailable_" if balances.get("demo_mode") else ""
         pk = wallet_mgr.get_wallet_info()["public_key"]
         await msg.edit_text(
             f"💰 *Your Balance*\n\n"
@@ -183,7 +168,6 @@ async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lines = ["📊 *Recent Transactions*\n_Only you can see this_\n"]
     total = 0.0
-
     for r in records:
         emoji = {"send": "📤", "receive": "📥", "booking": "🏨", "purchase": "🛒"}.get(r["type"], "💳")
         lines.append(
@@ -193,7 +177,6 @@ async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         if r["type"] in ("send", "booking", "purchase"):
             total += r["amount"]
-
     lines.append(f"\n💸 Total spent: *{total:.2f} USDC*")
 
     keyboard = InlineKeyboardMarkup([
@@ -219,15 +202,12 @@ async def wallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📋 Copy address", callback_data="copy_address")],
         [InlineKeyboardButton("💾 Export private key", callback_data="export_key")],
-        [InlineKeyboardButton("🔄 Deposit to PER", callback_data="deposit_per")],
-        [InlineKeyboardButton("⬆️ Withdraw from PER", callback_data="withdraw_per")],
     ])
     await update.message.reply_text(
         f"⚙️ *Wallet Management*\n\n"
         f"📍 Address:\n`{info['public_key']}`\n\n"
-        f"🔒 PER status: {'✅ Active' if info.get('per_active') else '❌ Not connected'}\n"
         f"🌐 Network: {'Solana Devnet' if config.USE_DEVNET else 'Solana Mainnet'}\n\n"
-        f"_Private key is encrypted and stored locally_",
+        f"_Private key is encrypted and stored securely_",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=keyboard
     )
@@ -235,9 +215,9 @@ async def wallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def clear_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clear_history(context)
+    context.user_data.pop("pending_tx", None)
     await update.message.reply_text(
-        "🗑 *Conversation context cleared.*\n\n"
-        "Starting fresh — the agent no longer remembers previous messages.",
+        "🗑 *Conversation context cleared.*",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -247,12 +227,11 @@ async def agent_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = f"📝 {len(history)} messages in context" if history else "🆕 Fresh context"
     await update.message.reply_text(
         f"🤖 *Agent ready* — {status}\n\n"
-        "Tell me what to do. I'll remember the context until a payment is made.\n\n"
-        "Examples:\n"
+        "Tell me what to do:\n"
         "• `Book a hotel in Paris for 2 nights`\n"
         "• `Send 20 USDC to Alex`\n"
         "• `How much did I spend this month?`\n"
-        "• `Buy a Nintendo Switch`",
+        "• `Deposit 5 USDC to private balance`",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -263,11 +242,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_id = str(update.effective_user.id)
 
-    # Keyboard shortcuts
     shortcuts = {
         "💬 Agent": agent_cmd,
         "💰 Balance": balance_cmd,
-        "📤 Send": lambda u, c: u.message.reply_text("Send USDC — just tell the agent: `Send X USDC to <address>`", parse_mode=ParseMode.MARKDOWN),
+        "📤 Send": lambda u, c: u.message.reply_text(
+            "Send USDC — just tell the agent:\n`Send X USDC to <address>`",
+            parse_mode=ParseMode.MARKDOWN
+        ),
         "📋 History": history_cmd,
         "⚙️ Wallet": wallet_cmd,
         "ℹ️ Help": help_cmd,
@@ -285,13 +266,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         storage = SpendingStorage(user_id)
         agent = ConsumerAgent(user_id=user_id, wallet_mgr=wallet_mgr, storage=storage)
-
-        # Load persisted history and process
         history = get_history(context)
         result = await agent.process(text, history)
 
-        # Save updated history
         set_history(context, result.get("history", history))
+
+        # Сохраняем pending_tx если агент запросил подтверждение
+        if result.get("awaiting_confirmation") and result.get("pending_tx"):
+            context.user_data["pending_tx"] = result["pending_tx"]
 
         await thinking_msg.edit_text(
             result["message"],
@@ -299,72 +281,128 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=result.get("keyboard")
         )
 
-        # Store pending tx data if awaiting confirmation
-        if result.get("awaiting_confirmation"):
-            context.user_data["pending_clear_on_confirm"] = result.get("clear_history_on_confirm", False)
-
     except Exception as e:
         logger.error(f"Agent error: {e}", exc_info=True)
         await thinking_msg.edit_text(f"⚠️ Agent error: {str(e)}\n\nTry rephrasing your request.")
 
 
-# ─── Callback Handlers ────────────────────────────────────────────────────────
+# ─── Callback Handler ─────────────────────────────────────────────────────────
+
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the payment confirmation button (English version)."""
     query = update.callback_query
     await query.answer()
     user_id = str(query.from_user.id)
     data = query.data
 
-    if data == "pay_now":
-        # Retrieve pending transaction data prepared by the Agent
-        tx_data = context.user_data.get("pending_tx")
-        if not tx_data:
+    # ── Отмена ───────────────────────────────────────────────────────────────
+    if data == "cancel_tx":
+        context.user_data.pop("pending_tx", None)
+        await query.edit_message_text(
+            "❌ *Payment cancelled.*",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    # ── Подтверждение платежа ─────────────────────────────────────────────────
+    if data.startswith("confirm_tx:"):
+        pending = context.user_data.get("pending_tx")
+        if not pending:
             await query.edit_message_text(
-                "⚠️ *Error:* Transaction data not found. Please try again.", 
+                "⚠️ *Session expired.* Please repeat your request.",
                 parse_mode=ParseMode.MARKDOWN
             )
             return
 
-        # Initialize Wallet Manager and MagicBlock Client
-        wm = WalletManager(user_id, config)
-        mb = MagicBlockClient(wm, config)
-        
-        # Show processing status
-        status_msg = await query.edit_message_text(
-            "🔒 *Initializing private payment via MagicBlock PER...*", 
+        await query.edit_message_text(
+            "🔒 *Processing private payment via MagicBlock PER...*",
             parse_mode=ParseMode.MARKDOWN
         )
-        
+
         try:
-            # Execute the real private transfer
-            # No link between sender and receiver will be visible on the main chain
-            result = await mb.private_transfer(
-                recipient=tx_data["recipient"],
-                amount=tx_data["amount"],
-                memo=tx_data.get("details", "Private Agent Order")
+            wallet_mgr = WalletManager(user_id)
+            storage = SpendingStorage(user_id)
+            agent = ConsumerAgent(user_id=user_id, wallet_mgr=wallet_mgr, storage=storage)
+
+            result = await agent.resume_after_confirmation(
+                tool_call_id=pending["tool_call_id"],
+                messages=pending["messages"],
+                history=get_history(context)
             )
 
-            # Success message
-            await status_msg.edit_text(
-                f"✅ *Payment Successful!*\n\n"
-                f"💵 Amount: `{tx_data['amount']} USDC`\n"
-                f"🛡️ Privacy: Confirmed in Private Rollup\n"
-                f"🔗 TX ID: `{result.get('tx_id', 'hidden')[:16]}...`",
-                parse_mode=ParseMode.MARKDOWN
-            )
+            # Очищаем после оплаты
+            set_history(context, result.get("history", []))
+            context.user_data.pop("pending_tx", None)
 
-            # Clear conversation context and pending data after successful purchase
-            context.user_data["history"] = []
-            context.user_data["pending_tx"] = None
+            await query.edit_message_text(
+                result["message"],
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=result.get("keyboard")
+            )
 
         except Exception as e:
-            # Error handling (e.g. insufficient private balance)
-            logger.error(f"Payment failed: {e}")
-            await status_msg.edit_text(
-                f"❌ *Payment Failed*\n\nReason: {str(e)}", 
+            logger.error(f"Payment failed: {e}", exc_info=True)
+            await query.edit_message_text(
+                f"❌ *Payment Failed*\n\n`{str(e)}`",
                 parse_mode=ParseMode.MARKDOWN
             )
+        return
+
+    # ── Stats ─────────────────────────────────────────────────────────────────
+    if data == "stats_full":
+        storage = SpendingStorage(user_id)
+        stats = storage.get_stats()
+        await query.edit_message_text(
+            f"📊 *Full Statistics*\n\n"
+            f"💸 Total spent: *{stats['total_sent']:.2f} USDC*\n"
+            f"📥 Total received: *{stats['total_received']:.2f} USDC*\n"
+            f"📅 This week: *{stats['week_spent']:.2f} USDC*\n"
+            f"🗓 This month: *{stats['month_spent']:.2f} USDC*\n\n"
+            f"🛒 Purchases: {stats['purchases']}\n"
+            f"🏨 Bookings: {stats['bookings']}\n"
+            f"📤 Transfers: {stats['transfers']}\n"
+            f"📋 Total records: {stats['total_records']}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    if data == "clear_history":
+        storage = SpendingStorage(user_id)
+        storage.clear_history()
+        await query.edit_message_text(
+            "🗑 *Spending history cleared.*",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    if data == "copy_address":
+        wallet_mgr = WalletManager(user_id)
+        info = wallet_mgr.get_wallet_info()
+        await query.edit_message_text(
+            f"📋 *Your Solana address:*\n\n`{info['public_key']}`\n\n_Tap to copy_",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    if data == "export_key":
+        await query.edit_message_text(
+            "⚠️ *Security Warning*\n\n"
+            "Private key export is disabled for your protection.\n"
+            "Your key is encrypted and stored securely.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+
+# ─── Error Handler ────────────────────────────────────────────────────────────
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    import telegram
+    if isinstance(context.error, telegram.error.Conflict):
+        logger.warning("409 Conflict: another bot instance is running. Will recover.")
+        return
+    logger.error(f"Update {update} caused error: {context.error}", exc_info=context.error)
+
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -379,9 +417,10 @@ def main():
     app.add_handler(CommandHandler("agent", agent_cmd))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_error_handler(error_handler)
 
     logger.info("🤖 Consumer Agent Bot started")
-    app.run_polling(drop_pending_updates=True)
+    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":

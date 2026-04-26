@@ -1,6 +1,6 @@
 """
 MagicBlockClient — реальный клиент для Private Payments API.
-С fallback на Solana RPC для баланса если payments API недоступен.
+https://payments.magicblock.app/reference
 """
 
 import base64
@@ -50,19 +50,12 @@ class MagicBlockClient:
             self.validator = MAINNET_VALIDATOR
             self.rpc_url   = RPC_MAINNET
 
-    # ── Helpers ───────────────────────────────────────────────────────────────
-
     async def _get_balance_via_rpc(self, pubkey: str) -> float:
-        """Получает USDC баланс напрямую через Solana JSON-RPC (fallback)."""
+        """Fallback: USDC баланс через Solana JSON-RPC."""
         payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
+            "jsonrpc": "2.0", "id": 1,
             "method": "getTokenAccountsByOwner",
-            "params": [
-                pubkey,
-                {"mint": self.mint},
-                {"encoding": "jsonParsed"}
-            ]
+            "params": [pubkey, {"mint": self.mint}, {"encoding": "jsonParsed"}]
         }
         async with httpx.AsyncClient(timeout=15) as http:
             r = await http.post(self.rpc_url, json=payload)
@@ -70,9 +63,8 @@ class MagicBlockClient:
             accounts = r.json().get("result", {}).get("value", [])
             logger.info(f"RPC token accounts: {accounts}")
             if accounts:
-                info = accounts[0]["account"]["data"]["parsed"]["info"]
-                ui_amount = info["tokenAmount"]["uiAmount"]
-                return float(ui_amount) if ui_amount else 0.0
+                ui = accounts[0]["account"]["data"]["parsed"]["info"]["tokenAmount"]["uiAmount"]
+                return float(ui) if ui else 0.0
         return 0.0
 
     def _sign_and_send_tx(self, tx_base64: str) -> str:
@@ -82,15 +74,12 @@ class MagicBlockClient:
 
         wallet = self.wallet_mgr.get_wallet_info()
         keypair = Keypair.from_bytes(bytes(wallet["private_key_bytes"]))
-
-        tx_bytes = base64.b64decode(tx_base64)
-        tx = Transaction.from_bytes(tx_bytes)
+        tx = Transaction.from_bytes(base64.b64decode(tx_base64))
         tx.sign([keypair])
 
         signed_b64 = base64.b64encode(bytes(tx)).decode()
         payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
+            "jsonrpc": "2.0", "id": 1,
             "method": "sendTransaction",
             "params": [signed_b64, {"encoding": "base64", "preflightCommitment": "confirmed"}]
         }
@@ -102,8 +91,6 @@ class MagicBlockClient:
                 raise ValueError(f"Solana RPC error: {result['error']['message']}")
             return result["result"]
 
-    # ── Public API ────────────────────────────────────────────────────────────
-
     async def get_balance(self) -> dict:
         wallet = self.wallet_mgr.get_wallet_info()
         pubkey = wallet["public_key"]
@@ -112,11 +99,10 @@ class MagicBlockClient:
         private_usdc = 0.0
         demo_mode    = False
 
-        params = {"owner": pubkey, "mint": self.mint, "cluster": self.cluster}
-
         async with httpx.AsyncClient(timeout=15) as http:
-            # 1. Публичный баланс — сначала пробуем payments API
+            # 1. Публичный баланс — fallback на RPC если payments API недоступен
             try:
+                params = {"owner": pubkey, "mint": self.mint, "cluster": self.cluster}
                 r = await http.get(f"{PAYMENTS_API}/balance", params=params)
                 logger.info(f"Balance API: status={r.status_code} body={r.text[:200]}")
                 r.raise_for_status()
@@ -129,12 +115,13 @@ class MagicBlockClient:
                 try:
                     solana_usdc = await self._get_balance_via_rpc(pubkey)
                 except Exception as e2:
-                    logger.warning(f"RPC fallback also failed: {e2}")
+                    logger.warning(f"RPC fallback failed: {e2}")
                     demo_mode = True
 
-            # 2. Приватный баланс — только через payments API
+            # 2. Приватный баланс — API требует параметр "address", не "owner"
             try:
-                r = await http.get(f"{PAYMENTS_API}/private-balance", params=params)
+                params_priv = {"address": pubkey, "mint": self.mint, "cluster": self.cluster}
+                r = await http.get(f"{PAYMENTS_API}/private-balance", params=params_priv)
                 logger.info(f"Private-balance API: status={r.status_code} body={r.text[:200]}")
                 r.raise_for_status()
                 data = r.json()
@@ -153,10 +140,8 @@ class MagicBlockClient:
 
     async def private_transfer(self, recipient: str, amount: float, memo: str = "") -> dict:
         wallet = self.wallet_mgr.get_wallet_info()
-        pubkey = wallet["public_key"]
-
         payload = {
-            "owner":       pubkey,
+            "owner":       wallet["public_key"],
             "destination": recipient,
             "amount":      _to_base_units(amount),
             "mint":        self.mint,
@@ -179,19 +164,15 @@ class MagicBlockClient:
             return {"success": True, "tx_id": sig, "amount": amount}
         except ImportError:
             return {
-                "success":          False,
-                "unsigned_tx":      tx_data["transactionBase64"],
+                "success": False, "unsigned_tx": tx_data["transactionBase64"],
                 "required_signers": tx_data.get("requiredSigners", []),
-                "send_to":          tx_data.get("sendTo"),
-                "amount":           amount,
+                "send_to": tx_data.get("sendTo"), "amount": amount,
             }
 
     async def deposit_to_per(self, amount: float) -> dict:
         wallet = self.wallet_mgr.get_wallet_info()
-        pubkey = wallet["public_key"]
-
         payload = {
-            "owner":              pubkey,
+            "owner":              wallet["public_key"],
             "amount":             _to_base_units(amount),
             "mint":               self.mint,
             "cluster":            self.cluster,
@@ -199,7 +180,6 @@ class MagicBlockClient:
             "initIfMissing":      True,
             "initVaultIfMissing": True,
         }
-
         async with httpx.AsyncClient(timeout=30) as http:
             r = await http.post(f"{PAYMENTS_API}/deposit", json=payload)
             r.raise_for_status()
@@ -213,17 +193,14 @@ class MagicBlockClient:
 
     async def withdraw_from_per(self, amount: float) -> dict:
         wallet = self.wallet_mgr.get_wallet_info()
-        pubkey = wallet["public_key"]
-
         payload = {
-            "owner":      pubkey,
+            "owner":      wallet["public_key"],
             "mint":       self.mint,
             "amount":     _to_base_units(amount),
             "cluster":    self.cluster,
             "validator":  self.validator,
             "idempotent": True,
         }
-
         async with httpx.AsyncClient(timeout=30) as http:
             r = await http.post(f"{PAYMENTS_API}/withdraw", json=payload)
             r.raise_for_status()
