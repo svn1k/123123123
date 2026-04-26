@@ -66,12 +66,15 @@ class MagicBlockClient:
         async with httpx.AsyncClient(timeout=15) as http:
             r = await http.post(self.rpc_url, json=payload)
             r.raise_for_status()
-            accounts = r.json().get("result", {}).get("value", [])
-            logger.info(f"RPC token accounts: {accounts}")
-            if accounts:
-                ui = accounts[0]["account"]["data"]["parsed"]["info"]["tokenAmount"]["uiAmount"]
-                return float(ui) if ui else 0.0
-        return 0.0
+            raw = r.json()
+            accounts = raw.get("result", {}).get("value", [])
+            logger.info(f"RPC token accounts for {pubkey[:8]}...: count={len(accounts)} raw={str(raw)[:300]}")
+            if not accounts:
+                logger.warning(f"No USDC token account found for {pubkey[:8]}... (mint={self.mint}). Wallet may need devnet USDC airdrop.")
+                return 0.0
+            ui = accounts[0]["account"]["data"]["parsed"]["info"]["tokenAmount"]["uiAmount"]
+            logger.info(f"RPC USDC balance: {ui}")
+            return float(ui) if ui else 0.0
 
     def _sign_and_send_tx(self, tx_base64: str, send_to: str = "base") -> str:
         """
@@ -170,11 +173,14 @@ class MagicBlockClient:
                 except Exception as e:
                     logger.warning(f"Private-balance ({pk_field}) error: {e}", exc_info=True)
 
+        explorer_base = "https://explorer.solana.com/address"
+        cluster_param = f"?cluster={self.cluster}"
         return {
             "solana_usdc":  solana_usdc,
             "private_usdc": private_usdc,
             "total":        solana_usdc + private_usdc,
             "demo_mode":    demo_mode,
+            "explorer_url": f"{explorer_base}/{wallet['public_key']}{cluster_param}",
         }
 
     async def private_transfer(self, recipient: str, amount: float, memo: str = "") -> dict:

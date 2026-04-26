@@ -138,15 +138,31 @@ async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         balances = await client.get_balance()
-        demo_note = "\n\n⚠️ _Demo mode — API unavailable_" if balances.get("demo_mode") else ""
         pk = wallet_mgr.get_wallet_info()["public_key"]
+        cluster = "devnet" if config.USE_DEVNET else "mainnet"
+        explorer_url = balances.get(
+            "explorer_url",
+            f"https://explorer.solana.com/address/{pk}?cluster={cluster}"
+        )
+        demo_note = "\n\n⚠️ _Demo mode — API unavailable_" if balances.get("demo_mode") else ""
+
+        faucet_note = ""
+        if balances["solana_usdc"] == 0.0 and balances["private_usdc"] == 0.0 and config.USE_DEVNET:
+            faucet_note = (
+                "\n\n💡 *Balance is 0?* Get free devnet USDC:\n"
+                "[spl\\-token\\-faucet\\.com](https://spl-token-faucet.com/?token-name=USDC)\n"
+                f"_Your address:_ `{pk}`"
+            )
+
         await msg.edit_text(
             f"💰 *Your Balance*\n\n"
-            f"🌐 Solana (public): `{balances['solana_usdc']:.4f} USDC`\n"
+            f"🌐 Solana \\(public\\): `{balances['solana_usdc']:.4f} USDC`\n"
             f"🔒 Private PER: `{balances['private_usdc']:.4f} USDC`\n\n"
-            f"📍 Wallet:\n`{pk}`"
-            + demo_note,
-            parse_mode=ParseMode.MARKDOWN
+            f"📍 Wallet:\n`{pk}`\n\n"
+            f"🔍 [View on Solana Explorer]({explorer_url})"
+            + demo_note + faucet_note,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            disable_web_page_preview=True
         )
     except Exception as e:
         await msg.edit_text(f"⚠️ Error fetching balance: {str(e)}")
