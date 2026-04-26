@@ -6,6 +6,7 @@ https://payments.magicblock.app/reference
 import base64
 import logging
 import time
+from urllib.parse import quote
 import httpx
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,7 @@ ROUTER_MAINNET = "https://router.magicblock.app"
 # MagicBlock ephemeral validator RPC (для транзакций в rollup)
 EPHEMERAL_RPC_DEVNET  = "https://devnet.magicblock.app"
 EPHEMERAL_RPC_MAINNET = "https://mainnet.magicblock.app"
+TEE_RPC_DEVNET = "https://devnet-tee.magicblock.app"
 TEE_RPC_MAINNET = "https://mainnet-tee.magicblock.app"
 
 USDC_DECIMALS = 6
@@ -52,6 +54,7 @@ class MagicBlockClient:
             self.rpc_url          = RPC_DEVNET
             self.router_url       = ROUTER_DEVNET
             self.ephemeral_rpc_url = EPHEMERAL_RPC_DEVNET
+            self.tee_rpc_url      = TEE_RPC_DEVNET
         else:
             self.cluster          = "mainnet"
             self.mint             = USDC_MAINNET
@@ -59,15 +62,16 @@ class MagicBlockClient:
             self.rpc_url          = RPC_MAINNET
             self.router_url       = ROUTER_MAINNET
             self.ephemeral_rpc_url = EPHEMERAL_RPC_MAINNET
+            self.tee_rpc_url      = TEE_RPC_MAINNET
 
     @property
     def authorization_token(self):
-        # Devnet currently works more reliably without private-balance authorization flow.
-        # Use MagicBlock authorization only on mainnet.
-        if self.use_devnet:
-            return ""
         if self.config.MAGICBLOCK_AUTHORIZATION:
             return self.config.MAGICBLOCK_AUTHORIZATION
+        # Devnet can still use the public ER endpoint directly.
+        # Only auto-fetch a TEE token when we're on mainnet.
+        if self.use_devnet:
+            return ""
         return self._ensure_authorization_token()
 
     def _coerce_expiry_ms(self, value) -> int:
@@ -92,7 +96,7 @@ class MagicBlockClient:
         pubkey = wallet["public_key"]
 
         with httpx.Client(timeout=20) as http:
-            challenge_resp = http.get(f"{TEE_RPC_MAINNET}/auth/challenge", params={"pubkey": pubkey})
+            challenge_resp = http.get(f"{self.tee_rpc_url}/auth/challenge", params={"pubkey": pubkey})
             challenge_resp.raise_for_status()
             challenge_json = challenge_resp.json()
             challenge = challenge_json.get("challenge")
@@ -105,7 +109,7 @@ class MagicBlockClient:
             signature_b58 = self.wallet_mgr.sign_message(challenge)
             logger.info(f"MagicBlock auth challenge received for {pubkey[:8]}...")
             auth_resp = http.post(
-                f"{TEE_RPC_MAINNET}/auth/login",
+                f"{self.tee_rpc_url}/auth/login",
                 json={
                     "pubkey": pubkey,
                     "challenge": challenge,
@@ -122,8 +126,54 @@ class MagicBlockClient:
 
             expires_at = self._coerce_expiry_ms(auth_json.get("expiresAt"))
             self.wallet_mgr.set_magicblock_auth(token, expires_at)
-            logger.info(f"Obtained MagicBlock mainnet auth token for {pubkey[:8]}...")
+            logger.info(f"Obtained MagicBlock {self.cluster} auth token for {pubkey[:8]}...")
             return token
+
+    @staticmethod
+    def _dedupe_urls(urls: list[str]) -> list[str]:
+        seen = set()
+        result = []
+        for url in urls:
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            result.append(url)
+        return result
+
+    def _get_private_tee_rpc_url(self) -> str | None:
+        """
+        Возвращает приватный TEE RPC endpoint с токеном, если авторизация доступна.
+        Для mainnet токен получаем автоматически, для devnet — используем только
+        явно переданный MAGICBLOCK_AUTHORIZATION.
+        """
+        try:
+            token = self.authorization_token
+        except Exception as e:
+            logger.warning(f"MagicBlock auth unavailable for TEE RPC: {e}")
+            return None
+
+        if not token:
+            return None
+        return f"{self.tee_rpc_url}?token={quote(token, safe='')}"
+
+    def _get_rpc_candidates(self, send_to: str) -> tuple[list[str], list[str]]:
+        if send_to == "ephemeral":
+            private_tee_rpc = self._get_private_tee_rpc_url()
+            submit_candidates = self._dedupe_urls([
+                private_tee_rpc,
+                self.ephemeral_rpc_url,
+                self.router_url,
+            ])
+            confirm_candidates = self._dedupe_urls([
+                private_tee_rpc,
+                self.ephemeral_rpc_url,
+                self.router_url,
+                self.rpc_url,
+            ])
+        else:
+            submit_candidates = self._dedupe_urls([self.rpc_url, self.router_url])
+            confirm_candidates = self._dedupe_urls([self.rpc_url, self.router_url])
+        return submit_candidates, confirm_candidates
 
     async def _get_balance_via_rpc(self, pubkey: str) -> float:
         """Fallback: USDC баланс через Solana JSON-RPC."""
@@ -231,12 +281,7 @@ class MagicBlockClient:
             signed_bytes = bytes(tx)
 
         signed_b64 = base64.b64encode(signed_bytes).decode()
-        if send_to == "ephemeral":
-            submit_candidates = [self.router_url]
-            confirm_candidates = [self.router_url, self.rpc_url]
-        else:
-            submit_candidates = [self.rpc_url, self.router_url]
-            confirm_candidates = [self.rpc_url, self.router_url]
+        submit_candidates, confirm_candidates = self._get_rpc_candidates(send_to)
 
         last_error = None
         for rpc_url in submit_candidates:
