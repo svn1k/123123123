@@ -5,6 +5,7 @@ ConsumerAgent — GitHub Models-powered autonomous agent.
 import asyncio
 import json
 import logging
+import re
 
 import httpx
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -436,6 +437,7 @@ Rules:
 6. Do not ask the user to deposit to PER manually for normal payments. The system auto-deposits if needed.
 7. Mention tx_id after successful payments.
 8. Use the exact requested amount.
+9. Never describe a function call, print JSON for a tool, or say you "will call" a tool. Call the tool directly.
 
 Respond in English. Use emojis. Markdown: *bold*, _italic_."""
 
@@ -745,6 +747,72 @@ class ConsumerAgent:
         resp.raise_for_status()
         return resp.json()
 
+    def _extract_pseudo_tool_calls(self, message: dict) -> list[dict]:
+        """
+        Some models occasionally print a JSON-looking function call in message.content
+        instead of returning structured tool_calls. Recover it here so the tool still runs.
+        """
+        content = message.get("content")
+        if not isinstance(content, str) or not content.strip():
+            return []
+
+        candidates = re.findall(r"```(?:json)?\s*(.*?)```", content, flags=re.DOTALL | re.IGNORECASE)
+        candidates.append(content)
+        known_tools = {
+            tool["function"]["name"]
+            for tool in AGENT_TOOLS
+            if tool.get("type") == "function" and tool.get("function", {}).get("name")
+        }
+
+        for raw in candidates:
+            snippet = raw.strip()
+            if not snippet:
+                continue
+            try:
+                payload = json.loads(snippet)
+            except Exception:
+                continue
+
+            items = payload if isinstance(payload, list) else [payload]
+            recovered_calls = []
+
+            for index, item in enumerate(items):
+                if not isinstance(item, dict):
+                    continue
+
+                fn = item.get("function", item)
+                if not isinstance(fn, dict):
+                    continue
+
+                fn_name = fn.get("name")
+                fn_args = fn.get("arguments", {})
+
+                if isinstance(fn_args, str):
+                    try:
+                        fn_args = json.loads(fn_args)
+                    except Exception:
+                        fn_args = {}
+
+                if fn_name not in known_tools or not isinstance(fn_args, dict):
+                    continue
+
+                recovered_calls.append(
+                    {
+                        "id": f"pseudo_{fn_name}_{index}",
+                        "type": "function",
+                        "function": {
+                            "name": fn_name,
+                            "arguments": json.dumps(fn_args, ensure_ascii=False),
+                        },
+                    }
+                )
+
+            if recovered_calls:
+                logger.warning("Recovered pseudo tool call(s) from assistant text: %s", [c["function"]["name"] for c in recovered_calls])
+                return recovered_calls
+
+        return []
+
     async def process(self, user_message: str, history: list) -> dict:
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         messages.extend(history)
@@ -755,11 +823,12 @@ class ConsumerAgent:
             data = await self._call_api(messages)
             choice = data["choices"][0]
             message = choice["message"]
+            tool_calls = message.get("tool_calls") or self._extract_pseudo_tool_calls(message)
 
             messages.append(message)
             new_messages.append(message)
 
-            if choice.get("finish_reason") == "stop" or not message.get("tool_calls"):
+            if choice.get("finish_reason") == "stop" and not tool_calls:
                 return {
                     "message": message.get("content") or "✅ Done.",
                     "keyboard": None,
@@ -767,7 +836,15 @@ class ConsumerAgent:
                     "awaiting_confirmation": False,
                 }
 
-            for tool_call in message["tool_calls"]:
+            if not tool_calls:
+                return {
+                    "message": message.get("content") or "✅ Done.",
+                    "keyboard": None,
+                    "history": history + new_messages,
+                    "awaiting_confirmation": False,
+                }
+
+            for tool_call in tool_calls:
                 fn_name = tool_call["function"]["name"]
                 try:
                     fn_args = json.loads(tool_call["function"]["arguments"])
@@ -830,9 +907,10 @@ class ConsumerAgent:
             data = await self._call_api(messages)
             choice = data["choices"][0]
             message = choice["message"]
+            tool_calls = message.get("tool_calls") or self._extract_pseudo_tool_calls(message)
             messages.append(message)
 
-            if choice.get("finish_reason") == "stop" or not message.get("tool_calls"):
+            if choice.get("finish_reason") == "stop" and not tool_calls:
                 return {
                     "message": message.get("content") or "✅ Payment completed.",
                     "keyboard": None,
@@ -840,7 +918,15 @@ class ConsumerAgent:
                     "awaiting_confirmation": False,
                 }
 
-            for tool_call in message["tool_calls"]:
+            if not tool_calls:
+                return {
+                    "message": message.get("content") or "✅ Payment completed.",
+                    "keyboard": None,
+                    "history": history,
+                    "awaiting_confirmation": False,
+                }
+
+            for tool_call in tool_calls:
                 fn_name = tool_call["function"]["name"]
                 try:
                     fn_args = json.loads(tool_call["function"]["arguments"])
